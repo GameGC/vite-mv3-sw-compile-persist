@@ -87,7 +87,7 @@ export function transform(code: string, options: TransformOptions = {}): Transfo
 
   // Load the virtual module
   const loaded = plugin.load!.call(pluginContext, VIRTUAL_ID);
-  virtualModuleCode = typeof loaded === 'string' ? loaded : '';
+  const virtualModuleCode = typeof loaded === 'string' ? loaded : '';
 
   return {
     code: transformedCode,

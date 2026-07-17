@@ -35,30 +35,33 @@ export function buildAdapterBlock(
     .join('\n');
 
   // ── setVar accessor ────────────────────────────────────────────
-  // In proxy mode, object vars need __mv3_reactive wrapping on set
+  // Uses __mv3_deserialize to restore Map/Set/Date from storage.
+  // In proxy mode, object vars need __mv3_reactive wrapping on set.
   const setVarCases = topVars
     .map((v) => {
       const wrapProxy = useProxy && v.isObject;
+      const deserialize = `__mv3_deserialize(value, '${v.collectionType ?? ''}')`;
       if (wrapProxy) {
-        return `      case '${v.name}': ${v.name} = __mv3_reactive(value, '${v.name}'); break;`;
+        return `      case '${v.name}': ${v.name} = __mv3_reactive(${deserialize}, '${v.name}'); break;`;
       }
-      return `      case '${v.name}': ${v.name} = value; break;`;
+      return `      case '${v.name}': ${v.name} = ${deserialize}; break;`;
     })
     .join('\n');
 
   // ── getDirtyData accessor ──────────────────────────────────────
+  // Uses __mv3_serialize to handle Map/Set/Date types that don't survive
+  // structured clone through chrome.storage.
   const dirtyDataCases = topVars
-    .map((v) => `      case '${v.name}': return { [prefix + '${v.name}']: ${v.name} };`)
+    .map((v) => `      case '${v.name}': return { [prefix + '${v.name}']: __mv3_serialize(${v.name}, '${v.collectionType ?? ''}') };`)
     .join('\n');
 
-  // ── Function registry entries (direct registerFn() calls) ──────
-  // Generate registerFn() calls directly from data structures
+  // ── Function registry entries (direct __mv3_registerFn() calls) ─
   const fnRegistryCalls = functionDecls
     .map((f) => {
       if (f.boundCode) {
-        return `registerFn('${f.name}', ${f.boundCode});`;
+        return `__mv3_registerFn('${f.name}', ${f.boundCode});`;
       }
-      return `registerFn('${f.name}', ${f.name});`;
+      return `__mv3_registerFn('${f.name}', ${f.name});`;
     });
 
   const recoveryFns = new Set<string>();
@@ -67,15 +70,15 @@ export function buildAdapterBlock(
   }
   const recoveryCalls = [...recoveryFns]
     .filter((fn) => !functionDecls.some((f) => f.name === fn))
-    .map((fn) => `registerFn('${fn}', ${fn});`);
+    .map((fn) => `__mv3_registerFn('${fn}', ${fn});`);
 
   const allRegistryCalls = [...fnRegistryCalls, ...recoveryCalls]
     .filter((s) => s.length > 0)
     .join('\n');
 
-  // ── Named alarm handlers (direct registerFn() calls) ────────────
+  // ── Named alarm handlers (direct __mv3_registerFn() calls) ──────
   const namedHandlerCalls = Object.entries(opts.namedAlarmHandlers)
-    .map(([k, v]) => `registerFn('${k}', ${v});`)
+    .map(([k, v]) => `__mv3_registerFn('${k}', ${v});`)
     .join('\n');
 
   // ── Initial Proxy wrapping for object vars ──────────────────────
@@ -90,17 +93,22 @@ export function buildAdapterBlock(
 
 const {
   __mv3_init,
+  __mv3_init_done,
   __mv3_markDirty,
   __mv3_setTimeout,
   __mv3_setInterval,
+  __mv3_setTimeoutPromise,
+  __mv3_setIntervalPromise,
   __mv3_clearTimeout,
   __mv3_clearInterval,
   __mv3_reactive,
   __mv3_getVar,
   __mv3_bindMethod,
-  registerFn,
+  __mv3_registerFn,
   __mv3_fn_registry,
   __mv3_fn_names,
+  __mv3_serialize,
+  __mv3_deserialize,
 } = createMV3Runtime(
   {
     varNames: ${JSON.stringify(varNames)},

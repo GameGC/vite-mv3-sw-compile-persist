@@ -29,58 +29,33 @@ export function buildVirtualRuntime(
   const booleanVars = topVars.filter((v) => v.isBoolean);
   const useProxy = opts.stateStrategy === 'proxy';
 
-  // ── Keepalive strategy code for __mv3_setTimeout short delays ─────
+  // ── Keepalive strategy code for __mv3_setTimeout (delay < ALARM_THRESHOLD) ──
+  // The outer __mv3_setTimeout already handles delay >= ALARM_THRESHOLD with
+  // chrome.alarms. This code handles delays BELOW the threshold.
   let shortDelayCode: string;
   if (opts.keepaliveStrategy === 'offscreen') {
     shortDelayCode = `
-  // Use offscreen API to keep SW alive during short timers (CWS-safe)
-  if (delay >= 5000) {
-    const alarmName = \`__mv3_alarm_timeout_\${__mv3_alarm_counter++}\`;
-    __mv3_alarm_callbacks.set(alarmName, callback);
-    const fnName = __mv3_fn_names.get(callback) || null;
-    __mv3_storage.set({
-      [__mv3_prefix + 'alarm_' + alarmName]: { fnName, delay, created: Date.now() }
-    }).catch(e => console.warn('[MV3 Persistent] Storage write failed:', e));
-    __mv3_ensureOffscreenDocument();
-    __mv3_ext.alarms.create(alarmName, { delayInMinutes: Math.max(delay / 60000, 0.5) });
-    return alarmName;
-  }
+  // Use offscreen document to keep SW alive during native timers
   __mv3_ensureOffscreenDocument();
   __mv3_native_timer_count++;
   const __nativeId = __native_setTimeout(() => {
     __mv3_native_timer_count--;
-    __mv3_untrackPromiseTimer(__nativeId);
     callback();
   }, delay);
-  __mv3_trackPromiseTimer(__nativeId, delay);
   return __nativeId;`;
   } else if (opts.keepaliveStrategy === 'alarm') {
     shortDelayCode = `
-  // Use alarms for all timers ≥ 5 seconds (CWS-safe)
-  if (delay >= 5000) {
-    const alarmName = \`__mv3_alarm_timeout_\${__mv3_alarm_counter++}\`;
-    __mv3_alarm_callbacks.set(alarmName, callback);
-    const fnName = __mv3_fn_names.get(callback) || null;
-    __mv3_storage.set({
-      [__mv3_prefix + 'alarm_' + alarmName]: { fnName, delay, created: Date.now() }
-    }).catch(e => console.warn('[MV3 Persistent] Storage write failed:', e));
-    __mv3_ext.alarms.create(alarmName, { delayInMinutes: Math.max(delay / 60000, 0.5) });
-    return alarmName;
-  }
+  // Native setTimeout for delays below alarmThresholdMs (no keepalive)
   const __nativeId = __native_setTimeout(() => {
-    __mv3_untrackPromiseTimer(__nativeId);
     callback();
   }, delay);
-  __mv3_trackPromiseTimer(__nativeId, delay);
   return __nativeId;`;
   } else {
     shortDelayCode = `
   // No keepalive — SW may die during short waits
   const __nativeId = __native_setTimeout(() => {
-    __mv3_untrackPromiseTimer(__nativeId);
     callback();
   }, delay);
-  __mv3_trackPromiseTimer(__nativeId, delay);
   return __nativeId;`;
   }
 
@@ -114,17 +89,30 @@ interface MV3VarAccessors {
 // ── Runtime API returned by createMV3Runtime ───────────────────────
 interface MV3RuntimeAPI {
   __mv3_init: Promise<void>;
+  /** Reflects whether init has completed — read-only getter. */
+  readonly __mv3_init_done: boolean;
   __mv3_markDirty(varName: string): void;
   __mv3_setTimeout(callback: () => void, delay: number): string | number;
   __mv3_setInterval(callback: () => void, intervalMs: number): string | number;
+  /** Like __mv3_setTimeout but also tracks the timer for promise-resolver
+   *  detection after SW restarts. Only used for promise-resolver timers
+   *  with promiseResolverStrategy: 'native'. */
+  __mv3_setTimeoutPromise(callback: () => void, delay: number): string | number;
+  /** Like __mv3_setInterval but also tracks the timer for promise-resolver
+   *  detection after SW restarts. */
+  __mv3_setIntervalPromise(callback: () => void, intervalMs: number): string | number;
   __mv3_clearTimeout(id: string | number | null | undefined): void;
   __mv3_clearInterval(id: string | number | null | undefined): void;
   __mv3_reactive<T extends object>(target: T, varName: string): T;
   __mv3_getVar(name: string): any;
   __mv3_bindMethod(varName: string, methodName: string): (...args: any[]) => any;
-  registerFn(name: string, fn: (...args: any[]) => any): void;
+  __mv3_registerFn(name: string, fn: (...args: any[]) => any): void;
   __mv3_fn_registry: Record<string, (...args: any[]) => any>;
   __mv3_fn_names: Map<(...args: any[]) => any, string>;
+  /** Serialize Map/Set/Date for chrome.storage (structured clone loses type info). */
+  __mv3_serialize(value: any, collectionType: string): any;
+  /** Deserialize Map/Set/Date from chrome.storage back to their proper types. */
+  __mv3_deserialize(raw: any, collectionType: string): any;
 }
 
 export function createMV3Runtime(
@@ -146,6 +134,7 @@ const __mv3_storage = config.storageArea === 'local'
   : __mv3_ext.storage.session;
 
 // ── Restore state from storage on startup ──────────────────────────
+let __mv3_init_done = false;
 const __mv3_init = (async () => {
   try {
     const __mv3_stored_keys = __mv3_varNames.map(k => __mv3_prefix + k);
@@ -185,6 +174,7 @@ const __mv3_init = (async () => {
   } catch (__mv3_e: any) {
     console.error('[MV3] Failed to restore persistent state:', __mv3_e);
   }
+  __mv3_init_done = true;
 })();
 
 // ── Flush state to storage ─────────────────────────────────────────
@@ -252,6 +242,34 @@ function __mv3_getVar(name: string): any {
   return accessors.getVar(name);
 }
 
+// ── Serialization helpers for Map / Set / Date ────────────────────────
+// chrome.storage performs structured clone internally, which loses Map/Set
+// (becomes {}) and Date (becomes string/number). We wrap them manually.
+
+function __mv3_serialize(value: any, collectionType: string): any {
+  if (value instanceof Map) {
+    return { __mv3_type: 'Map', entries: Array.from(value.entries()) };
+  }
+  if (value instanceof Set) {
+    return { __mv3_type: 'Set', values: Array.from(value.values()) };
+  }
+  if (value instanceof Date) {
+    return { __mv3_type: 'Date', iso: value.toISOString() };
+  }
+  return value;
+}
+
+function __mv3_deserialize(raw: any, collectionType: string): any {
+  if (raw && typeof raw === 'object' && raw.__mv3_type) {
+    switch (raw.__mv3_type) {
+      case 'Map': return new Map(raw.entries);
+      case 'Set': return new Set(raw.values);
+      case 'Date': return new Date(raw.iso);
+    }
+  }
+  return raw;
+}
+
 function __mv3_bindMethod(varName: string, methodName: string): (...args: any[]) => any {
   return function(...args: any[]) {
     const __obj = __mv3_getVar(varName);
@@ -264,6 +282,7 @@ function __mv3_bindMethod(varName: string, methodName: string): (...args: any[])
 
 ${useProxy ? `// ── Reactive tracking (stateStrategy: 'proxy') ────────────────────────
 const __mv3_PROXY_CACHE = new WeakMap<object, object>();
+const __mv3_isProxy = new WeakSet<object>();
 
 function __mv3_reactiveMap<K, V>(map: Map<K, V>, varName: string): Map<K, V> {
   const origSet = map.set.bind(map);
@@ -328,6 +347,11 @@ function __mv3_reactiveDate(date: Date, varName: string): Date {
 }
 
 function __mv3_reactive<T extends object>(target: T, varName: string): T {
+  // Defensive: if the value is already a Proxy created by us, don't wrap again.
+  // This prevents O(n) proxy-in-proxy layering on repeated full reassignments
+  // or accidental double-wrapping.
+  if (__mv3_isProxy.has(target as object)) return target;
+
   if (target instanceof Map) return __mv3_reactiveMap(target as any, varName) as T;
   if (target instanceof Set) return __mv3_reactiveSet(target as any, varName) as T;
   if (target instanceof Date) return __mv3_reactiveDate(target, varName) as T;
@@ -362,6 +386,7 @@ function __mv3_reactive<T extends object>(target: T, varName: string): T {
 
   const proxy = new Proxy(target, handler) as T;
   __mv3_PROXY_CACHE.set(target, proxy);
+  __mv3_isProxy.add(proxy as object);
   return proxy;
 }
 ` : `// stateStrategy: static — no reactive Proxy wrappers
@@ -433,7 +458,7 @@ const __mv3_fn_names = new Map<(...args: any[]) => any, string>();
  * after createMV3Runtime() returns to populate the registry with
  * user's top-level functions, recovery functions, and named handlers.
  */
-function registerFn(name: string, fn: (...args: any[]) => any): void {
+function __mv3_registerFn(name: string, fn: (...args: any[]) => any): void {
   __mv3_fn_registry[name] = fn;
   __mv3_fn_names.set(fn, name);
 }
@@ -473,12 +498,33 @@ function __mv3_setInterval(callback: () => void, intervalMs: number): string | n
     });
     return alarmName;
   }
-${opts.keepaliveStrategy === 'offscreen' ? `  __mv3_native_timer_count++;
+${opts.keepaliveStrategy === 'offscreen' ? `  __mv3_ensureOffscreenDocument();
+  __mv3_native_timer_count++;
   const __nativeId = __native_setInterval(callback, intervalMs);
-  __mv3_trackPromiseTimer(__nativeId, intervalMs);
   return __nativeId;` : `  const __nativeId = __native_setInterval(callback, intervalMs);
-  __mv3_trackPromiseTimer(__nativeId, intervalMs);
   return __nativeId;`}
+}
+
+function __mv3_setTimeoutPromise(callback: () => void, delay: number): string | number {
+  // Wrapper for promise-resolver timers (promiseResolverStrategy: 'native').
+  // Calls __mv3_setTimeout and then tracks the timer so that after an SW
+  // restart, we can detect the lost Promise and warn the developer.
+  const id = __mv3_setTimeout(() => {
+    __mv3_untrackPromiseTimer(id);
+    callback();
+  }, delay);
+  __mv3_trackPromiseTimer(id, delay);
+  return id;
+}
+
+function __mv3_setIntervalPromise(callback: () => void, intervalMs: number): string | number {
+  const id = __mv3_setInterval(() => {
+    // Intervals don't naturally untrack; they're only untracked
+    // via __mv3_clearInterval or SW restart cleanup.
+    callback();
+  }, intervalMs);
+  __mv3_trackPromiseTimer(id, intervalMs);
+  return id;
 }
 
 function __mv3_clearTimeout(id: string | number | null | undefined): void {
@@ -492,7 +538,7 @@ ${opts.keepaliveStrategy === 'offscreen' ? `    if (__mv3_alarm_callbacks.size =
     }` : ''}
   } else if (typeof id === 'number') {
     __native_clearTimeout(id);
-    __mv3_untrackPromiseTimer(id);
+    __mv3_untrackPromiseTimer(id); // no-op for non-promise timers
 ${opts.keepaliveStrategy === 'offscreen' ? `    __mv3_native_timer_count = Math.max(0, __mv3_native_timer_count - 1);
     if (__mv3_alarm_callbacks.size === 0 && __mv3_native_timer_count === 0) {
       __mv3_closeOffscreenDocument();
@@ -511,7 +557,7 @@ ${opts.keepaliveStrategy === 'offscreen' ? `    if (__mv3_alarm_callbacks.size =
     }` : ''}
   } else if (typeof id === 'number') {
     __native_clearInterval(id);
-    __mv3_untrackPromiseTimer(id);
+    __mv3_untrackPromiseTimer(id); // no-op for non-promise timers
 ${opts.keepaliveStrategy === 'offscreen' ? `    __mv3_native_timer_count = Math.max(0, __mv3_native_timer_count - 1);
     if (__mv3_alarm_callbacks.size === 0 && __mv3_native_timer_count === 0) {
       __mv3_closeOffscreenDocument();
@@ -616,17 +662,22 @@ ${opts.keepaliveStrategy === 'offscreen' ? `    if (__mv3_alarm_callbacks.size =
 // ── Return the runtime API ─────────────────────────────────────────
 return {
   __mv3_init,
+  get __mv3_init_done() { return __mv3_init_done; },
   __mv3_markDirty,
   __mv3_setTimeout,
   __mv3_setInterval,
+  __mv3_setTimeoutPromise,
+  __mv3_setIntervalPromise,
   __mv3_clearTimeout,
   __mv3_clearInterval,
   __mv3_reactive,
   __mv3_getVar,
   __mv3_bindMethod,
-  registerFn,
+  __mv3_registerFn,
   __mv3_fn_registry,
   __mv3_fn_names,
+  __mv3_serialize,
+  __mv3_deserialize,
 };
 
 } // end createMV3Runtime

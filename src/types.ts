@@ -24,12 +24,15 @@ export interface MV3PersistentOptions {
   /** Auto-flush interval in ms (0 = disabled). Default 2 000. */
   autoFlushMs?: number;
   /**
-   * Strategy for handling short timers (5 s – alarmThreshold):
-   * - 'alarm'    → use chrome.alarms for ALL timers ≥ 5 s
-   *                (CWS-safe, minimum real alarm delay ~30 s in prod)
+   * Strategy for keeping the service worker alive during timers:
+   * - 'alarm'    → use chrome.alarms for timers ≥ alarmThresholdMs (default 60 s).
+   *                Timers below alarmThresholdMs use native setTimeout with no
+   *                keepalive — the SW may die during short waits. Choose this when
+   *                you only need long-delay persistence and accept short-timer loss.
    * - 'offscreen' → create an offscreen document that keeps the SW alive
-   *                 via chrome.offscreen API (CWS-safe, Chrome 109+)
-   * - 'none'     → no keepalive, accept SW may die during short waits
+   *                 via chrome.offscreen API (CWS-safe, Chrome 109+). Best
+   *                 protection for short-delay timers that must not be lost.
+   * - 'none'     → no keepalive, accept SW may die during any wait
    */
   keepaliveStrategy?: 'alarm' | 'offscreen' | 'none';
   /** Named alarm handlers: key = alarm name, value = JS expression for a function. */
@@ -155,11 +158,33 @@ export interface HandlerInfo {
   isAsync: boolean;
   asyncInsertPos: number;
   isExpressionBody: boolean;
+  /**
+   * True if the handler returns a value (e.g. `return true` in onMessage
+   * or `return {cancel:true}` in blocking webRequest). Making such handlers
+   * async would break Chrome's message-channel and blocking-listener contracts.
+   */
+  hasReturnValue: boolean;
 }
 
 export interface AssignmentInfo {
   varName: string;
   stmtEnd: number;
+  stmtStart: number;
+  /**
+   * True when the statement is a bare body of if/else/for/while/etc.
+   * without braces — e.g. `if (cond) obj.x=1;`. Injecting markDirty
+   * after stmtEnd would place it outside the control flow, so the
+   * statement must be wrapped in braces first.
+   */
+  needsBracing: boolean;
+  /**
+   * True when the entire variable is reassigned (e.g. `obj = {...}`),
+   * false for property mutations (`obj.prop = 5`) or method calls
+   * (`obj.push(x)`). In proxy mode, only full reassignments need
+   * `__mv3_reactive` re-wrapping — property mutations are already
+   * caught by the Proxy's set trap.
+   */
+  isFullReassignment: boolean;
 }
 
 export interface FunctionDeclInfo {

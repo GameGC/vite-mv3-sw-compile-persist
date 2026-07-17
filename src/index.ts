@@ -80,6 +80,7 @@ export function mv3Persistent(userOptions: MV3PersistentOptions = {}): Plugin {
 
   return {
     name: 'vite-plugin-mv3-persistent',
+    version: '7.1',
     enforce: 'pre',
 
     resolveId(id) {
@@ -98,10 +99,12 @@ export function mv3Persistent(userOptions: MV3PersistentOptions = {}): Plugin {
     },
 
     transform(code, id) {
+      // Strip Vite's HMR query strings (?t=... / ?v=...) before matching
+      const cleanId = id.replace(/\?.*$/, '');
       const isMatch =
         typeof opts.backgroundEntry === 'string'
-          ? id.includes(opts.backgroundEntry)
-          : opts.backgroundEntry.test(id);
+          ? cleanId.includes(opts.backgroundEntry)
+          : opts.backgroundEntry.test(cleanId);
 
       if (!isMatch) return null;
 

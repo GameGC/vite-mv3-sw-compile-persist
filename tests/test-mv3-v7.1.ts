@@ -2,7 +2,7 @@
  * Regression tests for v7.1 fixes:
  *
  *   1. Fragile regex parsing in buildAdapterBlock replaced with
- *      direct registerFn() call generation from data structures
+ *      direct __mv3_registerFn() call generation from data structures
  *   2. __mv3_flush() removed (dead code)
  *   3. Silent .catch(() => {}) replaced with console.warn logging
  */
@@ -26,10 +26,10 @@ setTimeout(myHandler, 5000);
 `;
   const { code: out, virtualModule: vm } = transform(code);
 
-  // 1a. registerFn calls are present (not object-literal format)
+  // 1a. __mv3_registerFn calls are present (not object-literal format)
   assert(
-    out.includes("registerFn('myHandler', myHandler);"),
-    'registerFn call generated directly for function declaration'
+    out.includes("__mv3_registerFn('myHandler', myHandler);"),
+    '__mv3_registerFn call generated directly for function declaration'
   );
 
   // 1b. No object-literal-style registry entries
@@ -57,17 +57,17 @@ setTimeout(bound, 5000);
 `;
   const { code: out, virtualModule: vm } = transform(code);
 
-  // 1c. registerFn call for bound method — includes full boundCode expression
+  // 1c. __mv3_registerFn call for bound method — includes full boundCode expression
   assert(
-    out.includes("registerFn('bound',"),
-    'registerFn call generated for bound method'
+    out.includes("__mv3_registerFn('bound',"),
+    '__mv3_registerFn call generated for bound method'
   );
 
   // 1d. The bound expression is present in the registerFn call
   // (This would fail with the old regex if boundCode was multi-line)
   assert(
     out.includes('.bind('),
-    'Bound expression is present in registerFn call'
+    'Bound expression is present in __mv3_registerFn call'
   );
 }
 
@@ -78,10 +78,10 @@ setTimeout(bound, 5000);
     namedAlarmHandlers: { 'myAlarm': '() => { console.log("tick"); }' }
   });
 
-  // 1e. Named alarm handler uses registerFn directly
+  // 1e. Named alarm handler uses __mv3_registerFn directly
   assert(
-    out.includes("registerFn('myAlarm',"),
-    'Named alarm handler registered via registerFn'
+    out.includes("__mv3_registerFn('myAlarm',"),
+    'Named alarm handler registered via __mv3_registerFn'
   );
 }
 
@@ -96,10 +96,10 @@ setTimeout(() => { myRecoveryFn(); }, 5000);
 `;
   const { code: out } = transform(code);
 
-  // 1f. Recovery function registered via registerFn
+  // 1f. Recovery function registered via __mv3_registerFn
   assert(
-    out.includes("registerFn('myRecoveryFn', myRecoveryFn);"),
-    'Recovery function registered via registerFn'
+    out.includes("__mv3_registerFn('myRecoveryFn', myRecoveryFn);"),
+    'Recovery function registered via __mv3_registerFn'
   );
 }
 
@@ -214,7 +214,8 @@ console.log('\n=== 4. Version v7.1 consistency ===');
 
 {
   const { readFileSync } = require('fs');
-  const source = readFileSync(require('path').resolve(__dirname, '../src/index.ts'), 'utf-8');
+  const indexPath = require('path').resolve(__dirname, '../src/index.ts');
+  const source = readFileSync(indexPath, 'utf-8');
 
   // 4a. File header says v7.1
   assert(
@@ -222,10 +223,17 @@ console.log('\n=== 4. Version v7.1 consistency ===');
     'File header says v7.1'
   );
 
-  // 4b. Runtime version tag says v7.1
+  // 4a2. Plugin exports a version property
   assert(
-    source.includes('vite-plugin-mv3-persistent v7.1'),
-    'Runtime version tag says v7.1'
+    source.includes("version: '7.1'"),
+    'Plugin object has version: 7.1 property'
+  );
+
+  // 4b. Runtime version tag in adapter.ts
+  const adapterSource = readFileSync(require('path').resolve(__dirname, '../src/runtime/adapter.ts'), 'utf-8');
+  assert(
+    adapterSource.includes('vite-plugin-mv3-persistent v7.1'),
+    'Runtime version tag in adapter.ts says v7.1'
   );
 }
 
@@ -288,8 +296,8 @@ config.name = "updated";
     '__mv3_init injection still works'
   );
   assert(
-    out.includes("registerFn('tick', tick);"),
-    'registerFn for tick still works'
+    out.includes("__mv3_registerFn('tick', tick);"),
+    '__mv3_registerFn for tick still works'
   );
 
   // 5b. No regression in virtual module structure
