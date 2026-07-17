@@ -1,8 +1,5 @@
 /**
- * Shared test utilities for vite-plugin-mv3-persistent tests.
- * Provides a transform() helper that captures BOTH the adapter code
- * (injected into the user's file) AND the virtual module content,
- * so that pattern-matching assertions work across the v7 architecture.
+ * Shared test utilities for vite-plugin-mv3-persistent.
  */
 
 import { mv3Persistent } from '../src/index.js';
@@ -17,10 +14,10 @@ export function resetCounters() {
 
 export function assert(condition: boolean, label: string) {
   if (condition) {
-    console.log(`  ✅ ${label}`);
+    console.log(`  PASS ${label}`);
     _passed++;
   } else {
-    console.log(`  ❌ ${label}`);
+    console.log(`  FAIL ${label}`);
     _failed++;
   }
 }
@@ -30,7 +27,7 @@ export function getResults() {
 }
 
 export function printResults() {
-  console.log(`\n═══ Test Results: ${_passed} passed, ${_failed} failed ═══`);
+  console.log(`\nResults: ${_passed} passed, ${_failed} failed`);
   return _failed === 0;
 }
 
@@ -49,11 +46,8 @@ interface TransformOptions {
 }
 
 export interface TransformResult {
-  /** The transformed background.ts code (adapter + user code) */
   code: string;
-  /** The virtual module content (runtime code) */
   virtualModule: string;
-  /** Combined code + virtual module for pattern matching */
   combined: string;
 }
 
@@ -75,17 +69,14 @@ export function transform(code: string, options: TransformOptions = {}): Transfo
 
   const VIRTUAL_ID = '\0virtual:mv3-persistent-runtime.ts';
 
-  // Create a proper plugin context mock
   const pluginContext = {
     error(msg: string) { throw new Error(msg); },
     warn(msg: string) { /* suppress */ },
   };
 
-  // Call transform with proper this binding
   const result = plugin.transform!.call(pluginContext, code, '/background/index.ts');
   const transformedCode = result ? result.code : '';
 
-  // Load the virtual module
   const loaded = plugin.load!.call(pluginContext, VIRTUAL_ID);
   const virtualModuleCode = typeof loaded === 'string' ? loaded : '';
 

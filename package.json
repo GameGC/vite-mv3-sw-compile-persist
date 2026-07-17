@@ -1,46 +1,40 @@
 {
-  "name": "vite-plugin-mv3-persistent",
-  "version": "7.1.0",
-  "description": "AST-based Vite plugin that transforms Chrome Extension MV3 background service workers to persist state across SW restarts via chrome.storage.session and chrome.alarms",
-  "keywords": [
-    "vite",
-    "vite-plugin",
-    "chrome-extension",
-    "mv3",
-    "manifest-v3",
-    "service-worker",
-    "persistent-state",
-    "chrome.alarms",
-    "chrome.storage"
+  "name": "vite-mv3-sw-compile-persist",
+  "version": "0.1.0",
+  "description": "Vite Chrome MV3 background service worker state (variables & timers) across restarts — automatically, persist state across SW restarts via chrome.storage.session and chrome.alarms",
+  "keywords":[
+    "vite", "vite-plugin", "rollup",
+    "chrome-extension", "browser-extension", "web-extension",
+    "mv3", "manifest-v3",
+    "service-worker", "service-worker-lifecycle", "background-script",
+    "persistent-state", "state-persistence", "persist",
+    "keep-alive", "chrome-alarms", "chrome-storage"
   ],
-  "license": "MIT",
-  "author": "",
-  "repository": {
-    "type": "git",
-    "url": ""
-  },
+  "license": "Apache-2.0",
+  "author": "GameGC",
+  "repository": { "type": "git", "url": "git+https://github.com/GameGC/vite-mv3-sw-compile-persist.git" },
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "import": {
-        "types": "./dist/index.d.ts",
+        "types": "./dist/index.d.mts",
         "default": "./dist/index.mjs"
       },
       "require": {
-        "types": "./dist/index.d.cts",
-        "default": "./dist/index.cjs"
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
       }
     }
   },
-  "files": [
-    "dist"
-  ],
+  "homepage": "https://github.com/GameGC/vite-mv3-sw-compile-persist#readme",
+  "bugs": { "url": "https://github.com/GameGC/vite-mv3-sw-compile-persist/issues" },
+  "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "test": "node --import tsx tests/test-mv3-v7.1.ts",
+    "test": "node --import tsx tests/plugin.test.ts && node --import tsx tests/bracing.test.ts && node --import tsx tests/serialization.test.ts",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
