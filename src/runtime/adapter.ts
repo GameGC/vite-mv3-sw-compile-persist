@@ -65,7 +65,7 @@ export function buildAdapterBlock(
     : '';
 
   return `
-// MV3 Persistent State adapter (auto-generated)
+// MV3 Persist State adapter (auto-generated)
 
 const {
   __mv3_init,

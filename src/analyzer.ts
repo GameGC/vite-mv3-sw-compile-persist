@@ -29,7 +29,7 @@ export function parseCode(code: string): Babel.File {
 
   if (ast.errors && ast.errors.length > 0) {
     console.warn(
-      `[mv3-persistent] Parse errors in background source:\n` +
+      `[mv3-persist] Parse errors in background source:\n` +
       ast.errors.map((e: any) => `  Line ${e.loc?.line}: ${e.message}`).join('\n')
     );
   }
@@ -83,7 +83,7 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
         if (decl.id.type === 'ArrayPattern' || decl.id.type === 'ObjectPattern') {
           const patternCode = code.slice(decl.id.start!, decl.id.end!);
           console.warn(
-            `[mv3-persistent] Destructuring '${patternCode}' is not supported for persistence. ` +
+            `[mv3-persist] Destructuring '${patternCode}' is not supported for persistence. ` +
             `Use individual 'let' declarations instead.`
           );
         }
@@ -101,7 +101,7 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
         defaultCode.trim() === 'false' ||
         defaultCode.trim() === 'true';
 
-      let collectionType: 'map' | 'set' | 'date' | undefined;
+      let collectionType: 'map' | 'set' | 'date' | 'array' | undefined;
       if (
         decl.init.type === 'NewExpression' &&
         decl.init.callee.type === 'Identifier'
@@ -109,6 +109,9 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
         if (decl.init.callee.name === 'Map') collectionType = 'map';
         else if (decl.init.callee.name === 'Set') collectionType = 'set';
         else if (decl.init.callee.name === 'Date') collectionType = 'date';
+        else if (decl.init.callee.name === 'Array') collectionType = 'array';
+      } else if (decl.init.type === 'ArrayExpression') {
+        collectionType = 'array';
       }
 
       const isObject =

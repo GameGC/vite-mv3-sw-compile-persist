@@ -58,7 +58,7 @@ export function applyTransform(
 
   const adapterBlock = buildAdapterBlock(analysis, opts);
 
-  s.prepend(`import { createMV3Runtime } from 'virtual:mv3-persistent-runtime';\n`);
+  s.prepend(`import { createMV3Runtime } from 'virtual:mv3-persist-runtime';\n`);
 
   const insertPos = findInsertPosition(analysis.topVars, analysis.ast);
   s.appendRight(insertPos, adapterBlock);
@@ -90,7 +90,7 @@ export function applyTransform(
 
     if (tc.category === 'promise-resolver') {
       console.warn(
-        `[mv3-persistent] Promise-resolver timer at pos ${tc.start}: ` +
+        `[mv3-persist] Promise-resolver timer at pos ${tc.start}: ` +
         `new Promise(resolve => ${tc.type}(resolve, ...)). ` +
         `If the SW dies, the Promise will never resolve. ` +
         `Strategy: '${opts.promiseResolverStrategy}'. ` +
@@ -135,7 +135,7 @@ export function applyTransform(
 
       if (tc.category === 'complex-with-closure' && tc.recoveryFnName) {
         console.warn(
-          `[mv3-persistent] Timer callback at pos ${tc.start} captures closure variables. ` +
+          `[mv3-persist] Timer callback at pos ${tc.start} captures closure variables. ` +
           `Recovery action: ${tc.recoveryFnName}(). Consider namedAlarmHandlers.`,
         );
       }

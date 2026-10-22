@@ -56,7 +56,7 @@ export interface TopVarInfo {
   defaultCode: string;
   isBoolean: boolean;
   isObject: boolean;
-  collectionType?: 'map' | 'set' | 'date';
+  collectionType?: 'map' | 'set' | 'date' | 'array';
   start: number;
   end: number;
 }
@@ -121,7 +121,7 @@ export interface AnalysisResult {
 
 // --- Virtual Module ---
 
-export const VIRTUAL_MODULE_ID = 'virtual:mv3-persistent-runtime';
+export const VIRTUAL_MODULE_ID = 'virtual:mv3-persist-runtime';
 export const RESOLVED_VIRTUAL_ID = '\0' + VIRTUAL_MODULE_ID + '.ts';
 
 // --- Well-Known Globals ---

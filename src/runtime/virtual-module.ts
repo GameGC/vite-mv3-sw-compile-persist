@@ -40,7 +40,7 @@ export function buildVirtualRuntime(
   return __nativeId;`;
   }
 
-  return `// MV3 Persistent Runtime (auto-generated)
+  return `// MV3 persist Runtime (auto-generated)
 
 const __mv3_ext: any = globalThis.browser || globalThis.chrome;
 
@@ -135,7 +135,7 @@ const __mv3_init = (async () => {
       }
     }
   } catch (__mv3_e: any) {
-    console.error('[MV3] Failed to restore persistent state:', __mv3_e);
+    console.error('[MV3] Failed to restore persist state:', __mv3_e);
   }
   __mv3_init_done = true;
 })();
@@ -203,11 +203,26 @@ function __mv3_getVar(name: string): any {
   return accessors.getVar(name);
 }
 
-// Serialization for Map/Set/Date (structured clone through chrome.storage loses type info)
+// Recursively strip Proxy wrappers and produce a plain structure for chrome.storage.
+// Proxy-wrapped arrays/objects break structured clone, producing plain objects that lose Array methods.
+function __mv3_toPlain(value: any): any {
+  if (value === null || value === undefined || typeof value !== 'object') return value;
+  if (value instanceof Date) return { __mv3_type: 'Date', iso: value.toISOString() };
+  if (value instanceof Map) return { __mv3_type: 'Map', entries: Array.from(value.entries()) };
+  if (value instanceof Set) return { __mv3_type: 'Set', values: Array.from(value.values()) };
+  if (Array.isArray(value)) return value.map(__mv3_toPlain);
+  const result: any = {};
+  for (const key of Object.keys(value)) {
+    result[key] = __mv3_toPlain(value[key]);
+  }
+  return result;
+}
+
 function __mv3_serialize(value: any, collectionType: string): any {
   if (value instanceof Map) return { __mv3_type: 'Map', entries: Array.from(value.entries()) };
   if (value instanceof Set) return { __mv3_type: 'Set', values: Array.from(value.values()) };
   if (value instanceof Date) return { __mv3_type: 'Date', iso: value.toISOString() };
+  if (Array.isArray(value)) return { __mv3_type: 'Array', items: __mv3_toPlain(value) };
   return value;
 }
 
@@ -217,6 +232,7 @@ function __mv3_deserialize(raw: any, collectionType: string): any {
       case 'Map': return new Map(raw.entries);
       case 'Set': return new Set(raw.values);
       case 'Date': return new Date(raw.iso);
+      case 'Array': return raw.items.map((item: any) => __mv3_deserialize(item, ''));
     }
   }
   return raw;
@@ -310,13 +326,7 @@ function __mv3_reactive<T extends object>(target: T, varName: string): T {
   const handler: ProxyHandler<T> = {
     set(obj: any, key: string | symbol, value: any, receiver: any): boolean {
       const ok = Reflect.set(obj, key, value, receiver);
-      if (ok) {
-        __mv3_dirty.add(varName);
-        if (value && typeof value === 'object' && !__mv3_PROXY_CACHE.has(value)) {
-          const proxied = __mv3_reactive(value, varName);
-          obj[key] = proxied;
-        }
-      }
+      if (ok) __mv3_dirty.add(varName);
       return ok;
     },
     deleteProperty(obj: any, key: string | symbol): boolean {

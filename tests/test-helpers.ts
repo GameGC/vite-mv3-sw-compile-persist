@@ -1,5 +1,5 @@
 /**
- * Shared test utilities for vite-plugin-mv3-persistent.
+ * Shared test utilities for vite-plugin-mv3-persist.
  */
 
 import { mv3Persistent } from '../src/index.js';
@@ -67,7 +67,7 @@ export function transform(code: string, options: TransformOptions = {}): Transfo
     namedAlarmHandlers: options.namedAlarmHandlers ?? {},
   });
 
-  const VIRTUAL_ID = '\0virtual:mv3-persistent-runtime.ts';
+  const VIRTUAL_ID = '\0virtual:mv3-persist-runtime.ts';
 
   const pluginContext = {
     error(msg: string) { throw new Error(msg); },

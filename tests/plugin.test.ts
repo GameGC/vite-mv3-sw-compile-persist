@@ -137,9 +137,9 @@ console.log('\n=== Virtual module .ts extension ===');
     backgroundEntry: /.*/,
   });
 
-  const resolved = plugin.resolveId('virtual:mv3-persistent-runtime', '/src/bg.ts', {});
+  const resolved = plugin.resolveId('virtual:mv3-persist-runtime', '/src/bg.ts', {});
   assert(
-    resolved === '\0virtual:mv3-persistent-runtime.ts',
+    resolved === '\0virtual:mv3-persist-runtime.ts',
     'resolveId returns ID with .ts extension'
   );
 
@@ -147,13 +147,13 @@ console.log('\n=== Virtual module .ts extension ===');
     error(msg: string) { throw new Error(msg); },
   }, 'let x = 0;', '/bg.ts');
 
-  const loaded = plugin.load!.call({}, '\0virtual:mv3-persistent-runtime.ts');
+  const loaded = plugin.load!.call({}, '\0virtual:mv3-persist-runtime.ts');
   assert(
     typeof loaded === 'string' && loaded.includes('createMV3Runtime'),
     'load() returns content with .ts-suffixed ID'
   );
 
-  const oldIdLoaded = plugin.load!.call({}, '\0virtual:mv3-persistent-runtime');
+  const oldIdLoaded = plugin.load!.call({}, '\0virtual:mv3-persist-runtime');
   assert(
     oldIdLoaded === undefined || oldIdLoaded === null,
     'load() returns nothing for old non-.ts ID'
@@ -164,11 +164,11 @@ console.log('\n=== Virtual module .ts extension ===');
   const code = `let x = 0;`;
   const { code: out } = transform(code);
   assert(
-    out.includes("from 'virtual:mv3-persistent-runtime'"),
+    out.includes("from 'virtual:mv3-persist-runtime'"),
     "User code imports from bare virtual ID"
   );
   assert(
-    !out.includes("from 'virtual:mv3-persistent-runtime.ts'"),
+    !out.includes("from 'virtual:mv3-persist-runtime.ts'"),
     "User import does NOT have .ts"
   );
 }

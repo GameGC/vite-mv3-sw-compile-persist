@@ -53,7 +53,7 @@ No decorators. No wrapper API. No `await storage.get()` sprinkled everywhere. **
 **1. Install**
 
 ```bash
-npm i -D vite-plugin-mv3-persistent
+npm i -D vite-plugin-mv3-persist
 ```
 
 **2. Add to `vite.config.ts`**
@@ -221,7 +221,7 @@ npm test
 
 ## 📋 Requirements
 
-- Vite **≥ 4.0**
+- Vite **≥ 8.0**
 - A Chrome (or Chromium) **Manifest V3** extension
 - `manifest.json` permissions: `"storage"` (always) and `"alarms"` (for long timers); `"offscreen"` only if you choose `keepaliveStrategy: 'offscreen'`.
 

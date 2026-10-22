@@ -32,7 +32,7 @@ export function mv3Persistent(userOptions: MV3PersistentOptions = {}): Plugin {
 
   if (opts.keepaliveStrategy === 'offscreen') {
     console.warn(
-      `[mv3-persistent] keepaliveStrategy is 'offscreen'. ` +
+      `[mv3-persist] keepaliveStrategy is 'offscreen'. ` +
       `Make sure your manifest.json includes the 'offscreen' permission. ` +
       `Chrome allows only one offscreen document per extension; the plugin ` +
       `will not close one it didn't create.`
@@ -40,7 +40,7 @@ export function mv3Persistent(userOptions: MV3PersistentOptions = {}): Plugin {
   }
 
   return {
-    name: 'vite-plugin-mv3-persistent',
+    name: 'vite-plugin-mv3-persist',
     enforce: 'pre',
 
     resolveId(id) {
@@ -54,7 +54,7 @@ export function mv3Persistent(userOptions: MV3PersistentOptions = {}): Plugin {
         if (_virtualRuntimeCode) {
           return _virtualRuntimeCode;
         }
-        return `// mv3-persistent-runtime: not yet generated`;
+        return `// mv3-persist-runtime: not yet generated`;
       }
     },
 
