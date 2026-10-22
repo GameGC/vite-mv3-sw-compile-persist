@@ -16,6 +16,7 @@
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
+
   "exports": {
     ".": {
       "import": {
@@ -35,6 +36,7 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "test": "node --import tsx tests/plugin.test.ts && node --import tsx tests/bracing.test.ts && node --import tsx tests/serialization.test.ts",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
