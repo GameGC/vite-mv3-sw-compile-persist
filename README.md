@@ -53,7 +53,7 @@ No decorators. No wrapper API. No `await storage.get()` sprinkled everywhere. **
 **1. Install**
 
 ```bash
-npm i -D vite-plugin-mv3-persist
+npm i -D vite-mv3-sw-compile-persist
 ```
 
 **2. Add to `vite.config.ts`**

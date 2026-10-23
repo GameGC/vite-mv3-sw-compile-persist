@@ -1,6 +1,6 @@
 {
   "name": "vite-mv3-sw-compile-persist",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Vite Chrome MV3 background service worker state (variables & timers) across restarts — automatically, persist state across SW restarts via chrome.storage.session and chrome.alarms",
   "keywords":[
     "vite", "vite-plugin", "rollup",
