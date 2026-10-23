@@ -4,9 +4,9 @@
 
 **Your `let` variables survive service-worker restarts. Your `setTimeout`s survive too. Zero boilerplate, zero runtime library — it all happens at build time.**
 
-[![npm](https://img.shields.io/npm/v/vite-plugin-mv3-persistent.svg?color=cb3837&logo=npm)](https://www.npmjs.com/package/vite-plugin-mv3-persistent)
+[![npm](https://img.shields.io/npm/v/vite-mv3-sw-compile-persist.svg?color=cb3837&logo=npm)](https://www.npmjs.com/package/vite-mv3-sw-compile-persist)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
-[![Vite](https://img.shields.io/badge/Vite-%E2%89%A54.0-646CFF?logo=vite&logoColor=white)](https://vitejs.dev)
+[![Vite](https://img.shields.io/badge/Vite-%E2%89%A58.0-646CFF?logo=vite&logoColor=white)](https://vitejs.dev)
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-4285F4?logo=googlechrome&logoColor=white)](https://developer.chrome.com/docs/extensions/mv3/)
 [![Tests](https://img.shields.io/badge/tests-66%20passing-3fb950)](#-quality)
 
@@ -60,7 +60,7 @@ npm i -D vite-mv3-sw-compile-persist
 
 ```ts
 import { defineConfig } from 'vite';
-import { mv3Persistent } from 'vite-plugin-mv3-persistent';
+import { mv3Persistent } from 'vite-mv3-sw-compile-persist';
 
 export default defineConfig({
   plugins: [
@@ -132,12 +132,6 @@ chrome.action.onClicked.addListener(() => {
   count++;
 });
 
-
-
-
-
-
-
 setTimeout(cleanup, 5 * 60_000);
 ```
 
@@ -156,7 +150,7 @@ setTimeout(cleanup, 5 * 60_000);
 - **🎯 Smart & safe** — never breaks `onMessage` `return true`, never breaks blocking `webRequest` (those handlers stay synchronous).
 - **🧩 Objects, arrays, `Map`, `Set`, `Date`** — opt into `proxy` mode and even nested mutations mark state dirty automatically.
 - **🔐 Stale-lock recovery** — boolean "is-running" flags are auto-cleared when a worker dies mid-task, so you never deadlock.
-- **📦 TypeScript-first** — full types, ESM + CJS, works with any Vite ≥ 4 extension setup.
+- **📦 TypeScript-first** — full types, ESM + CJS, works with any Vite ≥ 8 extension setup.
 
 ---
 
@@ -229,7 +223,9 @@ npm test
 
 ## 🤝 Contributing
 
-Issues and PRs welcome! If this plugin saved you from MV3 state hell, **drop a ⭐ — it genuinely helps others find it.**
+Issues and PRs welcome! If this plugin saved you from MV3 state hell, **drop a ⭐** — it genuinely helps others find it.
+
+**GitHub:** https://github.com/GameGC/vite-mv3-sw-compile-persist
 
 ## 📄 License
 
