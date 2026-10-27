@@ -66,8 +66,8 @@ interface MV3RuntimeAPI {
   __mv3_init: Promise<void>;
   readonly __mv3_init_done: boolean;
   __mv3_markDirty(varName: string): void;
-  __mv3_setTimeout(callback: () => void, delay: number): string | number;
-  __mv3_setInterval(callback: () => void, intervalMs: number): string | number;
+  __mv3_setTimeout(callback: () => void, delay: number, recoveryFnName?: string): string | number;
+  __mv3_setInterval(callback: () => void, intervalMs: number, recoveryFnName?: string): string | number;
   __mv3_setTimeoutPromise(callback: () => void, delay: number): string | number;
   __mv3_setIntervalPromise(callback: () => void, intervalMs: number): string | number;
   __mv3_clearTimeout(id: any): void;
@@ -209,10 +209,20 @@ function __mv3_getVar(name: string): any {
 function __mv3_toPlain(value: any): any {
   if (value === null || value === undefined || typeof value !== 'object') return value;
   if (value instanceof Date) return { __mv3_type: 'Date', iso: value.toISOString() };
-  if (value instanceof Map) return { __mv3_type: 'Map', entries: Array.from(value.entries()) };
-  if (value instanceof Set) return { __mv3_type: 'Set', values: Array.from(value.values()) };
+  if (value instanceof Map) {
+    return {
+      __mv3_type: 'Map',
+      entries: Array.from(value.entries()).map(([k, v]) => [__mv3_toPlain(k), __mv3_toPlain(v)]),
+    };
+  }
+  if (value instanceof Set) {
+    return {
+      __mv3_type: 'Set',
+      values: Array.from(value.values()).map(__mv3_toPlain),
+    };
+  }
   if (Array.isArray(value)) return value.map(__mv3_toPlain);
-  const result: any = {};
+  const result: any = Object.getPrototypeOf(value) === null ? Object.create(null) : {};
   for (const key of Object.keys(value)) {
     result[key] = __mv3_toPlain(value[key]);
   }
@@ -220,23 +230,38 @@ function __mv3_toPlain(value: any): any {
 }
 
 function __mv3_serialize(value: any, collectionType: string): any {
-  if (value instanceof Map) return { __mv3_type: 'Map', entries: Array.from(value.entries()) };
-  if (value instanceof Set) return { __mv3_type: 'Set', values: Array.from(value.values()) };
+  if (value instanceof Map) return __mv3_toPlain(value);
+  if (value instanceof Set) return __mv3_toPlain(value);
   if (value instanceof Date) return { __mv3_type: 'Date', iso: value.toISOString() };
   if (Array.isArray(value)) return { __mv3_type: 'Array', items: __mv3_toPlain(value) };
+  if (value && typeof value === 'object') return __mv3_toPlain(value);
   return value;
 }
 
 function __mv3_deserialize(raw: any, collectionType: string): any {
-  if (raw && typeof raw === 'object' && raw.__mv3_type) {
+  if (raw === null || raw === undefined || typeof raw !== 'object') return raw;
+  if (raw.__mv3_type) {
     switch (raw.__mv3_type) {
-      case 'Map': return new Map(raw.entries);
-      case 'Set': return new Set(raw.values);
-      case 'Date': return new Date(raw.iso);
-      case 'Array': return raw.items.map((item: any) => __mv3_deserialize(item, ''));
+      case 'Map':
+        return new Map(
+          (raw.entries || []).map(([k, v]: any) => [__mv3_deserialize(k, ''), __mv3_deserialize(v, '')]),
+        );
+      case 'Set':
+        return new Set((raw.values || []).map((v: any) => __mv3_deserialize(v, '')));
+      case 'Date':
+        return new Date(raw.iso);
+      case 'Array':
+        return (raw.items || []).map((item: any) => __mv3_deserialize(item, ''));
     }
   }
-  return raw;
+  if (Array.isArray(raw)) {
+    return raw.map((item: any) => __mv3_deserialize(item, ''));
+  }
+  const result: any = Object.getPrototypeOf(raw) === null ? Object.create(null) : {};
+  for (const key of Object.keys(raw)) {
+    result[key] = __mv3_deserialize(raw[key], '');
+  }
+  return result;
 }
 
 function __mv3_bindMethod(varName: string, methodName: string): (...args: any[]) => any {
@@ -254,6 +279,7 @@ const __mv3_PROXY_CACHE = new WeakMap<object, object>();
 const __mv3_isProxy = new WeakSet<object>();
 
 function __mv3_reactiveMap<K, V>(map: Map<K, V>, varName: string): Map<K, V> {
+  if (__mv3_isProxy.has(map as object)) return map;
   const origSet = map.set.bind(map);
   const origDelete = map.delete.bind(map);
   const origClear = map.clear.bind(map);
@@ -271,10 +297,12 @@ function __mv3_reactiveMap<K, V>(map: Map<K, V>, varName: string): Map<K, V> {
     origClear();
     __mv3_dirty.add(varName);
   };
+  __mv3_isProxy.add(map as object);
   return map;
 }
 
 function __mv3_reactiveSet<T>(set: Set<T>, varName: string): Set<T> {
+  if (__mv3_isProxy.has(set as object)) return set;
   const origAdd = set.add.bind(set);
   const origDelete = set.delete.bind(set);
   const origClear = set.clear.bind(set);
@@ -292,10 +320,12 @@ function __mv3_reactiveSet<T>(set: Set<T>, varName: string): Set<T> {
     origClear();
     __mv3_dirty.add(varName);
   };
+  __mv3_isProxy.add(set as object);
   return set;
 }
 
 function __mv3_reactiveDate(date: Date, varName: string): Date {
+  if (__mv3_isProxy.has(date as object)) return date;
   const mutatingMethods = [
     'setDate', 'setFullYear', 'setHours', 'setMilliseconds',
     'setMinutes', 'setMonth', 'setSeconds', 'setTime',
@@ -312,6 +342,7 @@ function __mv3_reactiveDate(date: Date, varName: string): Date {
       };
     }
   }
+  __mv3_isProxy.add(date as object);
   return date;
 }
 
@@ -424,11 +455,11 @@ let __mv3_alarm_counter = 0;
 const __mv3_alarm_callbacks = new Map<string, () => void>();
 ${opts.keepaliveStrategy === 'offscreen' ? `let __mv3_native_timer_count = 0;` : ''}
 
-function __mv3_setTimeout(callback: () => void, delay: number): string | number {
+function __mv3_setTimeout(callback: () => void, delay: number, recoveryFnName?: string): string | number {
   if (delay >= __mv3_ALARM_THRESHOLD) {
     const alarmName = \`__mv3_alarm_timeout_\${__mv3_alarm_counter++}\`;
     __mv3_alarm_callbacks.set(alarmName, callback);
-    const fnName = __mv3_fn_names.get(callback) || null;
+    const fnName = __mv3_fn_names.get(callback) || recoveryFnName || null;
     __mv3_storage.set({
       [__mv3_prefix + 'alarm_' + alarmName]: { fnName, delay, created: Date.now() }
     }).catch(e => console.warn('[MV3] Storage write failed:', e));
@@ -440,11 +471,11 @@ function __mv3_setTimeout(callback: () => void, delay: number): string | number 
 ${shortDelayCode}
 }
 
-function __mv3_setInterval(callback: () => void, intervalMs: number): string | number {
+function __mv3_setInterval(callback: () => void, intervalMs: number, recoveryFnName?: string): string | number {
   if (intervalMs >= __mv3_ALARM_THRESHOLD) {
     const alarmName = \`__mv3_alarm_interval_\${__mv3_alarm_counter++}\`;
     __mv3_alarm_callbacks.set(alarmName, callback);
-    const fnName = __mv3_fn_names.get(callback) || null;
+    const fnName = __mv3_fn_names.get(callback) || recoveryFnName || null;
     __mv3_storage.set({
       [__mv3_prefix + 'alarm_' + alarmName]: { fnName, intervalMs, created: Date.now() }
     }).catch(e => console.warn('[MV3] Storage write failed:', e));

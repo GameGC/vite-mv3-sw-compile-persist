@@ -436,16 +436,14 @@ let workerState = 'ready';
     expect(out).toContain('createMV3Runtime(');
   });
 
-  await harness.runTest('5.4.5: White-box AST verification: export let statement is documented and safe', () => {
+  await harness.runTest('5.4.5: White-box AST verification: export let statement is tracked and persisted', () => {
     const code = `
 export let exportedLet = 0;
 let regularLet = 1;
 `;
-    // Babel AST treats `export let` as ExportNamedDeclaration.
-    // The compiler safely parses without throwing, and regular top-level let is tracked.
     const { code: out } = compileSource(code);
     expect(out).toContain('"regularLet"');
-    expect(out).toNotContain('"exportedLet"');
+    expect(out).toContain('"exportedLet"');
     expect(typeof out).toBe('string');
   });
 
@@ -609,7 +607,7 @@ runComplex();
     ctx2.destroy();
   });
 
-  await harness.runTest('5.5.8: Return statement with inline assignment return (status = "returned") analysis', () => {
+  await harness.runTest('5.5.8: Return with inline assignment executes markDirty via try-finally before returning', () => {
     const code = `
 let status = 'init';
 function testReturn() {
@@ -617,11 +615,10 @@ function testReturn() {
 }
 `;
     const { code: out } = compileSource(code);
-    // Transformed code places markDirty after the statement end (after return semicolon)
-    expect(out).toContain("return (status = 'returned'); __mv3_markDirty('status');");
+    expect(out).toContain("try { return (status = 'returned'); } finally { __mv3_markDirty('status'); }");
   });
 
-  await harness.runTest('5.5.9: Top-level constant initialized via function calling markDirty exposes TDZ placement in findInsertPosition', () => {
+  await harness.runTest('5.5.9: Impure top-level const init gets createMV3Runtime placed before it (no TDZ)', () => {
     const code = `
 let count = 0;
 function helper() {
@@ -632,8 +629,7 @@ const init = helper();
     const { code: out } = compileSource(code);
     const posCreateRuntime = out.indexOf('createMV3Runtime(');
     const posConstInit = out.indexOf('const init = helper();');
-    // Documents that DECL_TYPES treats const init as declaration to insert after, placing adapter after const init
-    expect(posCreateRuntime).toBeGreaterThan(posConstInit);
+    expect(posCreateRuntime).toBeLessThan(posConstInit);
   });
 
   // ==========================================================================

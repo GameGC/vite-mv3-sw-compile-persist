@@ -54,7 +54,7 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "test": "node --import tsx tests/plugin.test.ts && node --import tsx tests/bracing.test.ts && node --import tsx tests/serialization.test.ts && node --import tsx tests/job-scraper.test.ts && node --import tsx tests/simulator.test.ts && node --import tsx tests/api-flavors.test.ts && node --import tsx tests/state-strategies.test.ts && node --import tsx tests/timers-alarms.test.ts && node --import tsx tests/listeners-safety.test.ts && node --import tsx tests/control-flow.test.ts && node --import tsx tests/config-options.test.ts && node --import tsx tests/build-integration.test.ts && node --import tsx tests/e2e/runner.ts",
+    "test": "node --import tsx tests/plugin.test.ts && node --import tsx tests/bracing.test.ts && node --import tsx tests/serialization.test.ts && node --import tsx tests/job-scraper.test.ts && node --import tsx tests/simulator.test.ts && node --import tsx tests/api-flavors.test.ts && node --import tsx tests/state-strategies.test.ts && node --import tsx tests/timers-alarms.test.ts && node --import tsx tests/listeners-safety.test.ts && node --import tsx tests/control-flow.test.ts && node --import tsx tests/config-options.test.ts && node --import tsx tests/build-integration.test.ts && node --import tsx tests/compiler-torture.test.ts && node --import tsx tests/compiler-combinatorial.test.ts && node --import tsx tests/e2e/runner.ts",
     "test:e2e": "node --import tsx tests/e2e/runner.ts",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build"

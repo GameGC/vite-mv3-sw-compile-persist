@@ -38,6 +38,46 @@ export function parseCode(code: string): Babel.File {
   return ast;
 }
 
+// --- Helpers for AST unwrapping ---
+
+export function unwrapExpression(node: Babel.Node | null | undefined): Babel.Node | null | undefined {
+  let curr = node;
+  while (
+    curr &&
+    (curr.type === 'TSAsExpression' ||
+      curr.type === 'TSSatisfiesExpression' ||
+      curr.type === 'TSTypeAssertion' ||
+      curr.type === 'TSNonNullExpression' ||
+      curr.type === 'TSInstantiationExpression' ||
+      curr.type === 'ParenthesizedExpression')
+  ) {
+    curr = (curr as any).expression;
+  }
+  return curr;
+}
+
+/**
+ * Source span of an expression-bodied arrow function's body INCLUDING any wrapping
+ * parentheses (Babel excludes them from body.start/end: `() => (x = 1)`).
+ */
+export function exprBodySpan(fn: any): { start: number; end: number } {
+  const body = fn.body;
+  let start: number = body.start;
+  const ps = body.extra?.parenthesized ? body.extra.parenStart : undefined;
+  if (typeof ps === 'number' && ps < start) start = ps;
+  return { start, end: fn.end };
+}
+
+export function unwrapTopLevelNode(node: Babel.Node): Babel.Node {
+  if (node.type === 'ExportNamedDeclaration' && node.declaration) {
+    return node.declaration;
+  }
+  if (node.type === 'ExportDefaultDeclaration' && node.declaration) {
+    return node.declaration;
+  }
+  return node;
+}
+
 // --- analyze ---
 
 export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
@@ -52,18 +92,26 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
   const functionDecls: FunctionDeclInfo[] = [];
   const topLevelBindings = new Set<string>();
 
-  // Collect top-level bindings
-  for (const node of ast.program.body) {
+  // Collect top-level bindings (including exported declarations)
+  for (const rawNode of ast.program.body) {
+    const node = unwrapTopLevelNode(rawNode);
     if (node.type === 'VariableDeclaration') {
       for (const decl of node.declarations) {
-        if (decl.id.type === 'Identifier') {
-          topLevelBindings.add(decl.id.name);
+        const targets = extractPatternTargets(decl.id);
+        for (const t of targets) {
+          if (t.type === 'Identifier') {
+            topLevelBindings.add(t.name);
+          }
         }
       }
     } else if (node.type === 'FunctionDeclaration' && node.id) {
       topLevelBindings.add(node.id.name);
-    } else if (node.type === 'ImportDeclaration') {
-      for (const spec of node.specifiers) {
+    } else if (node.type === 'ClassDeclaration' && node.id) {
+      topLevelBindings.add(node.id.name);
+    } else if (node.type === 'TSEnumDeclaration' && node.id) {
+      topLevelBindings.add(node.id.name);
+    } else if (rawNode.type === 'ImportDeclaration') {
+      for (const spec of rawNode.specifiers) {
         if (spec.type === 'ImportDefaultSpecifier') {
           topLevelBindings.add(spec.local.name);
         } else if (spec.type === 'ImportNamespaceSpecifier') {
@@ -75,8 +123,9 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
     }
   }
 
-  // Top-level variable declarations
-  for (const node of ast.program.body) {
+  // Top-level variable declarations (including export let / export var)
+  for (const rawNode of ast.program.body) {
+    const node = unwrapTopLevelNode(rawNode);
     if (node.type !== 'VariableDeclaration') continue;
     if (node.kind !== 'let' && node.kind !== 'var') continue;
 
@@ -98,32 +147,79 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
       if (opts.persistentVars.size > 0 && !opts.persistentVars.has(name)) continue;
 
       const defaultCode = code.slice(decl.init.start!, decl.init.end!);
+      const initNode = unwrapExpression(decl.init)!;
+      const typeAnn = (decl.id as any).typeAnnotation?.typeAnnotation;
+
       const isBoolean =
-        decl.init.type === 'BooleanLiteral' ||
+        initNode.type === 'BooleanLiteral' ||
         defaultCode.trim() === 'false' ||
-        defaultCode.trim() === 'true';
+        defaultCode.trim() === 'true' ||
+        (initNode.type === 'UnaryExpression' && initNode.operator === '!') ||
+        (initNode.type === 'CallExpression' &&
+          initNode.callee.type === 'Identifier' &&
+          initNode.callee.name === 'Boolean') ||
+        typeAnn?.type === 'TSBooleanKeyword';
 
       let collectionType: 'map' | 'set' | 'date' | 'array' | undefined;
       if (
-        decl.init.type === 'NewExpression' &&
-        decl.init.callee.type === 'Identifier'
+        initNode.type === 'NewExpression' &&
+        initNode.callee.type === 'Identifier'
       ) {
-        if (decl.init.callee.name === 'Map') collectionType = 'map';
-        else if (decl.init.callee.name === 'Set') collectionType = 'set';
-        else if (decl.init.callee.name === 'Date') collectionType = 'date';
-        else if (decl.init.callee.name === 'Array') collectionType = 'array';
-      } else if (decl.init.type === 'ArrayExpression') {
+        if (initNode.callee.name === 'Map') collectionType = 'map';
+        else if (initNode.callee.name === 'Set') collectionType = 'set';
+        else if (initNode.callee.name === 'Date') collectionType = 'date';
+        else if (initNode.callee.name === 'Array') collectionType = 'array';
+      } else if (initNode.type === 'ArrayExpression') {
+        collectionType = 'array';
+      } else if (
+        initNode.type === 'CallExpression' &&
+        initNode.callee.type === 'MemberExpression' &&
+        initNode.callee.object.type === 'Identifier' &&
+        initNode.callee.object.name === 'Array' &&
+        initNode.callee.property.type === 'Identifier' &&
+        ['from', 'of'].includes(initNode.callee.property.name)
+      ) {
         collectionType = 'array';
       }
 
+      if (!collectionType && typeAnn) {
+        if (typeAnn.type === 'TSArrayType' || typeAnn.type === 'TSTupleType') {
+          collectionType = 'array';
+        } else if (
+          typeAnn.type === 'TSTypeReference' &&
+          typeAnn.typeName?.type === 'Identifier'
+        ) {
+          const refName = typeAnn.typeName.name;
+          if (refName === 'Map') collectionType = 'map';
+          else if (refName === 'Set') collectionType = 'set';
+          else if (refName === 'Date') collectionType = 'date';
+          else if (refName === 'Array') collectionType = 'array';
+        }
+      }
+
+      const isObjectCall =
+        initNode.type === 'CallExpression' &&
+        initNode.callee.type === 'MemberExpression' &&
+        initNode.callee.object.type === 'Identifier' &&
+        initNode.callee.object.name === 'Object' &&
+        initNode.callee.property.type === 'Identifier' &&
+        ['create', 'assign', 'fromEntries'].includes(initNode.callee.property.name);
+
+      const isObjectTypeAnn =
+        typeAnn?.type === 'TSTypeLiteral' ||
+        (typeAnn?.type === 'TSTypeReference' &&
+          typeAnn.typeName?.type === 'Identifier' &&
+          ['Record', 'Object'].includes(typeAnn.typeName.name));
+
       const isObject =
-        decl.init.type === 'ObjectExpression' ||
-        decl.init.type === 'ArrayExpression' ||
+        initNode.type === 'ObjectExpression' ||
+        initNode.type === 'ArrayExpression' ||
         collectionType !== undefined ||
-        decl.init.type === 'NewExpression' && (
-          (decl.init.callee.type === 'Identifier' &&
-            ['Array', 'Object'].includes(decl.init.callee.name))
-        );
+        isObjectCall ||
+        isObjectTypeAnn ||
+        (initNode.type === 'NewExpression' &&
+          initNode.callee.type === 'Identifier' &&
+          ['Array', 'Object'].includes(initNode.callee.name));
 
       topVars.push({
         name,
@@ -133,36 +229,39 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
         collectionType,
         start: decl.start!,
         end: decl.end!,
+        stmtEnd: rawNode.end!,
       });
     }
   }
 
   const persistentVarNames = new Set(topVars.map((v) => v.name));
 
-  // Collect function declarations (including bound methods)
-  for (const node of ast.program.body) {
+  // Collect function declarations (including bound methods and exported functions)
+  for (const rawNode of ast.program.body) {
+    const node = unwrapTopLevelNode(rawNode);
     if (node.type === 'FunctionDeclaration' && node.id) {
-      functionDecls.push({ name: node.id.name });
+      functionDecls.push({ name: node.id.name, end: rawNode.end!, isHoisted: true });
     } else if (node.type === 'VariableDeclaration') {
       for (const decl of node.declarations) {
         if (decl.id.type !== 'Identifier' || !decl.init) continue;
         const name = decl.id.name;
+        const initNode = unwrapExpression(decl.init)!;
 
         if (
-          decl.init.type === 'FunctionExpression' ||
-          decl.init.type === 'ArrowFunctionExpression'
+          initNode.type === 'FunctionExpression' ||
+          initNode.type === 'ArrowFunctionExpression'
         ) {
-          functionDecls.push({ name });
+          functionDecls.push({ name, end: rawNode.end!, isHoisted: false });
         } else if (
-          decl.init.type === 'CallExpression' &&
-          decl.init.callee.type === 'MemberExpression' &&
-          decl.init.callee.property.type === 'Identifier' &&
-          decl.init.callee.property.name === 'bind'
+          initNode.type === 'CallExpression' &&
+          initNode.callee.type === 'MemberExpression' &&
+          initNode.callee.property.type === 'Identifier' &&
+          initNode.callee.property.name === 'bind'
         ) {
           const boundCode = code.slice(decl.init.start!, decl.init.end!);
-          functionDecls.push({ name, boundCode });
+          functionDecls.push({ name, boundCode, end: rawNode.end!, isHoisted: false });
 
-          const objRef = decl.init.callee.object;
+          const objRef = initNode.callee.object;
           const rootName = resolveRootIdentifier(objRef);
           if (rootName && persistentVarNames.has(rootName)) {
             console.warn(
@@ -178,6 +277,94 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
 
   // Walk the AST for timers, handlers, assignments
   const isInsidePromiseResolver = new WeakSet<Babel.Node>();
+  const seenHandlerNodes = new WeakSet<Babel.Node>();
+
+  function recordAssignment(rootName: string, path: any, isFullReassignment: boolean) {
+    const info = findStatementInfo(path);
+    if (!info) return;
+    const existing = assignments.find(
+      (a) =>
+        a.varName === rootName &&
+        a.stmtStart === info.stmtStart &&
+        a.stmtEnd === info.stmtEnd &&
+        a.needsBracing === info.needsBracing &&
+        Boolean(a.isArrowExprBody) === Boolean(info.isArrowExprBody),
+    );
+    if (!existing) {
+      assignments.push({
+        varName: rootName,
+        stmtEnd: info.stmtEnd,
+        stmtStart: info.stmtStart,
+        needsBracing: info.needsBracing,
+        isFullReassignment,
+        isReturnOrThrow: info.isReturnOrThrow,
+        isArrowExprBody: info.isArrowExprBody,
+      });
+    } else {
+      if (!existing.isFullReassignment && isFullReassignment) {
+        existing.isFullReassignment = true;
+      }
+      if (!existing.isReturnOrThrow && info.isReturnOrThrow) {
+        existing.isReturnOrThrow = true;
+      }
+    }
+  }
+
+  function registerHandlerFn(fnNode: Babel.Node) {
+    if (seenHandlerNodes.has(fnNode)) return;
+    if (
+      fnNode.type !== 'ArrowFunctionExpression' &&
+      fnNode.type !== 'FunctionExpression' &&
+      fnNode.type !== 'FunctionDeclaration'
+    ) {
+      return;
+    }
+    seenHandlerNodes.add(fnNode);
+
+    const isAsync = !!fnNode.async;
+    const body = fnNode.body;
+    const isExpressionBody = body.type !== 'BlockStatement';
+    let bodyStart: number;
+    let bodyEnd: number;
+    if (body.type === 'BlockStatement') {
+      bodyStart = body.start! + 1;
+      bodyEnd = body.end! - 1;
+    } else {
+      const span = exprBodySpan(fnNode);
+      bodyStart = span.start;
+      bodyEnd = span.end;
+    }
+
+    const asyncInsertPos = fnNode.start!;
+
+    // Handlers that return a value must NOT be made async.
+    let hasReturnValue = false;
+    if (isExpressionBody) {
+      const unwrappedBody = unwrapExpression(body);
+      if (unwrappedBody?.type === 'BooleanLiteral' && unwrappedBody.value === true) {
+        hasReturnValue = true;
+      } else if (unwrappedBody?.type === 'SequenceExpression' && unwrappedBody.expressions.length > 0) {
+        const lastExpr = unwrapExpression(unwrappedBody.expressions[unwrappedBody.expressions.length - 1]);
+        if (lastExpr?.type === 'BooleanLiteral' && lastExpr.value === true) {
+          hasReturnValue = true;
+        }
+      }
+    } else if (body.type === 'BlockStatement') {
+      hasReturnValue = checkBlockHasReturnValue(body);
+    }
+
+    const asyncIIFEs = findAsyncIIFEs(body);
+
+    handlers.push({
+      bodyStart,
+      bodyEnd,
+      isAsync,
+      asyncInsertPos,
+      isExpressionBody,
+      hasReturnValue,
+      asyncIIFEs,
+    });
+  }
 
   traverse(ast, {
     NewExpression(path: any) {
@@ -187,10 +374,11 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
       const args = path.node.arguments;
       if (args.length === 0) return;
 
-      const executor = args[0];
+      const executor = unwrapExpression(args[0]);
       if (
-        executor.type !== 'ArrowFunctionExpression' &&
-        executor.type !== 'FunctionExpression'
+        !executor ||
+        (executor.type !== 'ArrowFunctionExpression' &&
+          executor.type !== 'FunctionExpression')
       )
         return;
 
@@ -200,104 +388,118 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
     CallExpression(path: any) {
       const callee = path.node.callee;
 
-      // setTimeout / setInterval
+      // Resolve timer callee name (supports both setTimeout(...) and globalThis/self/window.setTimeout(...))
+      let timerCalleeName: string | null = null;
       if (callee.type === 'Identifier') {
-        if (callee.name === 'setTimeout' || callee.name === 'setInterval') {
-          const prefix = code.slice(Math.max(0, callee.start! - 7), callee.start!);
-          if (prefix.endsWith('__mv3_')) return;
+        timerCalleeName = callee.name;
+      } else if (
+        callee.type === 'MemberExpression' &&
+        callee.object.type === 'Identifier' &&
+        ['globalThis', 'self', 'window'].includes(callee.object.name) &&
+        callee.property.type === 'Identifier'
+      ) {
+        timerCalleeName = callee.property.name;
+      }
 
-          const args = path.node.arguments;
-          if (args.length < 2) return;
+      // setTimeout / setInterval
+      if (timerCalleeName === 'setTimeout' || timerCalleeName === 'setInterval') {
+        const prefix = code.slice(Math.max(0, callee.start! - 7), callee.start!);
+        if (prefix.endsWith('__mv3_')) return;
 
-          const callbackArg = args[0];
-          const delayArg = args[1];
+        const args = path.node.arguments;
+        if (args.length < 2) return;
 
-          let category: TimerCallInfo['category'] = 'complex-with-closure';
-          let recoveryFnName: string | null = null;
-          let innerFnName: string | null = null;
+        const rawCallbackArg = args[0];
+        const callbackArg = unwrapExpression(rawCallbackArg) || rawCallbackArg;
+        const delayArg = args[1];
 
-          let isPromiseResolver = false;
-          let ancestorPath: any = path.getFunctionParent();
-          while (ancestorPath) {
-            if (isInsidePromiseResolver.has(ancestorPath.node as Babel.Node)) {
-              isPromiseResolver = true;
-              break;
-            }
-            ancestorPath = ancestorPath.parentPath?.getFunctionParent?.();
+        let category: TimerCallInfo['category'] = 'complex-with-closure';
+        let recoveryFnName: string | null = null;
+        let innerFnName: string | null = null;
+
+        let isPromiseResolver = false;
+        let ancestorPath: any = path.getFunctionParent();
+        while (ancestorPath) {
+          if (isInsidePromiseResolver.has(ancestorPath.node as Babel.Node)) {
+            isPromiseResolver = true;
+            break;
           }
-
-          if (isPromiseResolver) {
-            category = 'promise-resolver';
-          } else if (callbackArg.type === 'Identifier') {
-            category = 'named-ref';
-            recoveryFnName = callbackArg.name;
-            innerFnName = callbackArg.name;
-          } else if (
-            callbackArg.type === 'ArrowFunctionExpression' ||
-            callbackArg.type === 'FunctionExpression'
-          ) {
-            const calledFns = extractCalledFunctions(callbackArg);
-
-            const callbackPath = path.get('arguments')[0] as any;
-            const hasClosureVars = detectClosureVars(
-              callbackPath,
-              persistentVarNames,
-              topLevelBindings,
-              opts.safeClosureVars,
-            );
-
-            if (calledFns.length === 1 && !hasClosureVars) {
-              category = 'simple-wrapper';
-              recoveryFnName = calledFns[0];
-              innerFnName = calledFns[0];
-            } else if (!hasClosureVars) {
-              category = 'complex-no-closure';
-              recoveryFnName = calledFns.length > 0 ? calledFns[calledFns.length - 1] : null;
-            } else {
-              category = 'complex-with-closure';
-              recoveryFnName = calledFns.length > 0 ? calledFns[calledFns.length - 1] : null;
-            }
-          }
-
-          const evaluatedDelay = evaluateNumericExpression(delayArg, path.scope);
-          const delayIsNumeric = evaluatedDelay !== null;
-          const delayValue = evaluatedDelay;
-          const isAlarm = evaluatedDelay !== null ? evaluatedDelay >= opts.alarmThresholdMs : undefined;
-
-          timerCalls.push({
-            type: callee.name as 'setTimeout' | 'setInterval',
-            start: path.node.start!,
-            end: path.node.end!,
-            callbackNode: callbackArg,
-            callbackStart: callbackArg.start!,
-            callbackEnd: callbackArg.end!,
-            delayNode: delayArg,
-            category,
-            recoveryFnName,
-            innerFnName,
-            delayIsNumeric,
-            delayValue,
-            isAlarm,
-          });
-          return;
+          ancestorPath = ancestorPath.parentPath?.getFunctionParent?.();
         }
 
-        // clearTimeout / clearInterval
-        if (callee.name === 'clearTimeout' || callee.name === 'clearInterval') {
-          const prefix = code.slice(Math.max(0, callee.start! - 7), callee.start!);
-          if (prefix.endsWith('__mv3_')) return;
+        if (isPromiseResolver) {
+          category = 'promise-resolver';
+        } else if (callbackArg.type === 'Identifier') {
+          category = 'named-ref';
+          recoveryFnName = callbackArg.name;
+          innerFnName = callbackArg.name;
+        } else if (
+          callbackArg.type === 'ArrowFunctionExpression' ||
+          callbackArg.type === 'FunctionExpression'
+        ) {
+          const calledFns = extractCalledFunctions(callbackArg);
+          const singleZeroArgFn = isSingleZeroArgCall(callbackArg);
 
-          const arg = path.node.arguments[0];
-          const argCode = arg ? code.slice(arg.start!, arg.end!) : 'undefined';
+          const callbackPath = path.get('arguments')[0] as any;
+          const hasClosureVars = detectClosureVars(
+            callbackPath,
+            persistentVarNames,
+            topLevelBindings,
+            opts.safeClosureVars,
+          );
 
-          clearTimerCalls.push({
-            type: callee.name as 'clearTimeout' | 'clearInterval',
-            start: path.node.start!,
-            end: path.node.end!,
-            argCode,
-          });
-          return;
+          if (singleZeroArgFn && !hasClosureVars) {
+            category = 'simple-wrapper';
+            recoveryFnName = singleZeroArgFn;
+            innerFnName = singleZeroArgFn;
+          } else if (!hasClosureVars) {
+            category = 'complex-no-closure';
+            recoveryFnName = calledFns.length > 0 ? calledFns[calledFns.length - 1] : null;
+          } else {
+            category = 'complex-with-closure';
+            recoveryFnName = calledFns.length > 0 ? calledFns[calledFns.length - 1] : null;
+          }
         }
+
+        const evaluatedDelay = evaluateNumericExpression(delayArg, path.scope);
+        const delayIsNumeric = evaluatedDelay !== null;
+        const delayValue = evaluatedDelay;
+        const isAlarm = evaluatedDelay !== null ? evaluatedDelay >= opts.alarmThresholdMs : undefined;
+
+        timerCalls.push({
+          type: timerCalleeName as 'setTimeout' | 'setInterval',
+          start: path.node.start!,
+          end: path.node.end!,
+          calleeEnd: callee.end!,
+          callbackNode: callbackArg,
+          callbackStart: rawCallbackArg.start!,
+          callbackEnd: rawCallbackArg.end!,
+          delayNode: delayArg,
+          category,
+          recoveryFnName,
+          innerFnName,
+          delayIsNumeric,
+          delayValue,
+          isAlarm,
+        });
+        return;
+      }
+
+      // clearTimeout / clearInterval
+      if (timerCalleeName === 'clearTimeout' || timerCalleeName === 'clearInterval') {
+        const prefix = code.slice(Math.max(0, callee.start! - 7), callee.start!);
+        if (prefix.endsWith('__mv3_')) return;
+
+        const arg = path.node.arguments[0];
+        const argCode = arg ? code.slice(arg.start!, arg.end!) : 'undefined';
+
+        clearTimerCalls.push({
+          type: timerCalleeName as 'clearTimeout' | 'clearInterval',
+          start: path.node.start!,
+          end: path.node.end!,
+          argCode,
+        });
+        return;
       }
 
       // Intercept chrome.alarms.clearAll(), browser.alarms.clearAll(), Browser.alarms.clearAll(), alarms.clearAll()
@@ -332,59 +534,62 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
         }
       }
 
-      // addListener handlers
+      // addListener handlers (both inline functions and top-level named function references)
       if (
         callee.type === 'MemberExpression' &&
         callee.property.type === 'Identifier' &&
         callee.property.name === 'addListener'
       ) {
-        const callback = path.node.arguments[0];
-        if (callback && (
-          callback.type === 'ArrowFunctionExpression' ||
-          callback.type === 'FunctionExpression'
-        )) {
-          const isAsync = !!callback.async;
-
-          const body = callback.body;
-          const isExpressionBody = body.type !== 'BlockStatement';
-          let bodyStart: number;
-          let bodyEnd: number;
-          if (body.type === 'BlockStatement') {
-            bodyStart = body.start! + 1;
-            bodyEnd = body.end! - 1;
-          } else {
-            bodyStart = body.start!;
-            bodyEnd = body.end!;
-          }
-
-          const asyncInsertPos = callback.start!;
-
-          // Handlers that return a value must NOT be made async.
-          let hasReturnValue = false;
-          if (isExpressionBody) {
-            if (body.type === 'BooleanLiteral' && body.value === true) {
-              hasReturnValue = true;
+        const rawCallback = path.node.arguments[0];
+        const callback = unwrapExpression(rawCallback);
+        if (callback) {
+          if (
+            callback.type === 'ArrowFunctionExpression' ||
+            callback.type === 'FunctionExpression'
+          ) {
+            registerHandlerFn(callback);
+          } else if (callback.type === 'Identifier') {
+            const binding = path.scope.getBinding(callback.name);
+            if (binding && binding.scope.block.type === 'Program') {
+              if (binding.path.isFunctionDeclaration() && binding.path.node.body) {
+                registerHandlerFn(binding.path.node);
+              } else if (binding.path.isVariableDeclarator()) {
+                const init = unwrapExpression(binding.path.node.init);
+                if (
+                  init &&
+                  (init.type === 'ArrowFunctionExpression' ||
+                    init.type === 'FunctionExpression')
+                ) {
+                  registerHandlerFn(init);
+                }
+              }
             }
-          } else if (body.type === 'BlockStatement') {
-            hasReturnValue = checkBlockHasReturnValue(body);
           }
+        }
+      }
 
-          const asyncIIFEs = findAsyncIIFEs(callback.body);
-
-          handlers.push({
-            bodyStart,
-            bodyEnd,
-            isAsync,
-            asyncInsertPos,
-            isExpressionBody,
-            hasReturnValue,
-            asyncIIFEs,
-          });
+      // Object.assign(target, ...), Object.defineProperty(target, ...), Reflect.set(target, ...), Reflect.deleteProperty(target, ...)
+      if (
+        callee.type === 'MemberExpression' &&
+        callee.object.type === 'Identifier' &&
+        callee.property.type === 'Identifier' &&
+        ((callee.object.name === 'Object' && ['assign', 'defineProperty', 'defineProperties'].includes(callee.property.name)) ||
+          (callee.object.name === 'Reflect' && ['set', 'deleteProperty', 'defineProperty'].includes(callee.property.name)))
+      ) {
+        const firstArg = path.node.arguments[0];
+        if (firstArg) {
+          const rootName = resolveRootIdentifier(firstArg);
+          if (rootName && persistentVarNames.has(rootName)) {
+            const binding = path.scope.getBinding(rootName);
+            if (binding && binding.scope.block.type === 'Program') {
+              recordAssignment(rootName, path, false);
+            }
+          }
         }
       }
 
       // Method calls on persistent vars
-      if (callee.type === 'MemberExpression') {
+      if (callee.type === 'MemberExpression' || callee.type === 'OptionalMemberExpression') {
         if (
           callee.property.type === 'Identifier' &&
           callee.property.name === 'addListener'
@@ -395,21 +600,7 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
           if (rootName && persistentVarNames.has(rootName)) {
             const binding = path.scope.getBinding(rootName);
             if (!binding || binding.scope.block.type !== 'Program') return;
-            const info = findStatementInfo(path);
-            if (info) {
-              const existing = assignments.find(
-                (a) => a.varName === rootName && a.stmtEnd === info.stmtEnd,
-              );
-              if (!existing) {
-                assignments.push({
-                  varName: rootName,
-                  stmtEnd: info.stmtEnd,
-                  stmtStart: info.stmtStart,
-                  needsBracing: info.needsBracing,
-                  isFullReassignment: false,
-                });
-              }
-            }
+            recordAssignment(rootName, path, false);
           }
         }
       }
@@ -419,55 +610,68 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
       const left = path.node.left;
       const targets = extractPatternTargets(left);
       for (const target of targets) {
-        const rootName = resolveRootIdentifier(target);
+        const unwrappedTarget = unwrapExpression(target) || target;
+        const rootName = resolveRootIdentifier(unwrappedTarget);
         if (rootName && persistentVarNames.has(rootName)) {
           const binding = path.scope.getBinding(rootName);
           if (!binding || binding.scope.block.type !== 'Program') continue;
-          const info = findStatementInfo(path);
-          if (info) {
-            const isFullReassignment = target.type === 'Identifier';
-            const existing = assignments.find(
-              (a) => a.varName === rootName && a.stmtEnd === info.stmtEnd,
-            );
-            if (!existing) {
-              assignments.push({
-                varName: rootName,
-                stmtEnd: info.stmtEnd,
-                stmtStart: info.stmtStart,
-                needsBracing: info.needsBracing,
-                isFullReassignment,
-              });
-            } else if (!existing.isFullReassignment && isFullReassignment) {
-              existing.isFullReassignment = true;
-            }
-          }
+          const isFullReassignment = unwrappedTarget.type === 'Identifier';
+          recordAssignment(rootName, path, isFullReassignment);
         }
       }
     },
 
     UpdateExpression(path: any) {
-      const arg = path.node.argument;
+      const arg = unwrapExpression(path.node.argument) || path.node.argument;
       const rootName = resolveRootIdentifier(arg);
       if (rootName && persistentVarNames.has(rootName)) {
         const binding = path.scope.getBinding(rootName);
         if (binding && binding.scope.block.type === 'Program') {
-          const info = findStatementInfo(path);
-          if (info) {
-            const isFullReassignment = arg.type === 'Identifier';
-            const existing = assignments.find(
-              (a) => a.varName === rootName && a.stmtEnd === info.stmtEnd,
-            );
-            if (!existing) {
-              assignments.push({
-                varName: rootName,
-                stmtEnd: info.stmtEnd,
-                stmtStart: info.stmtStart,
-                needsBracing: info.needsBracing,
-                isFullReassignment,
-              });
-            } else if (!existing.isFullReassignment && isFullReassignment) {
-              existing.isFullReassignment = true;
-            }
+          const isFullReassignment = arg.type === 'Identifier';
+          recordAssignment(rootName, path, isFullReassignment);
+        }
+      }
+    },
+
+    UnaryExpression(path: any) {
+      if (path.node.operator !== 'delete') return;
+      const arg = unwrapExpression(path.node.argument) || path.node.argument;
+      const rootName = resolveRootIdentifier(arg);
+      if (rootName && persistentVarNames.has(rootName)) {
+        const binding = path.scope.getBinding(rootName);
+        if (binding && binding.scope.block.type === 'Program') {
+          recordAssignment(rootName, path, false);
+        }
+      }
+    },
+
+    ForOfStatement(path: any) {
+      const left = path.node.left;
+      if (left.type === 'VariableDeclaration') return;
+      const targets = extractPatternTargets(left);
+      for (const target of targets) {
+        const unwrappedTarget = unwrapExpression(target) || target;
+        const rootName = resolveRootIdentifier(unwrappedTarget);
+        if (rootName && persistentVarNames.has(rootName)) {
+          const binding = path.scope.getBinding(rootName);
+          if (binding && binding.scope.block.type === 'Program') {
+            recordAssignment(rootName, path, unwrappedTarget.type === 'Identifier');
+          }
+        }
+      }
+    },
+
+    ForInStatement(path: any) {
+      const left = path.node.left;
+      if (left.type === 'VariableDeclaration') return;
+      const targets = extractPatternTargets(left);
+      for (const target of targets) {
+        const unwrappedTarget = unwrapExpression(target) || target;
+        const rootName = resolveRootIdentifier(unwrappedTarget);
+        if (rootName && persistentVarNames.has(rootName)) {
+          const binding = path.scope.getBinding(rootName);
+          if (binding && binding.scope.block.type === 'Program') {
+            recordAssignment(rootName, path, unwrappedTarget.type === 'Identifier');
           }
         }
       }
@@ -489,14 +693,76 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
 
 // --- Helpers ---
 
-export function resolveRootIdentifier(node: Babel.Node): string | null {
-  let current: Babel.Node = node;
-  while (current.type === 'MemberExpression') {
-    current = (current as Babel.MemberExpression).object;
+export function resolveRootIdentifier(node: Babel.Node | null | undefined): string | null {
+  let current = unwrapExpression(node);
+  while (
+    current &&
+    (current.type === 'MemberExpression' || current.type === 'OptionalMemberExpression')
+  ) {
+    current = unwrapExpression((current as any).object);
   }
-  if (current.type === 'Identifier') {
+  if (current && current.type === 'Identifier') {
     return (current as Babel.Identifier).name;
   }
+  return null;
+}
+
+function unwrapCallExpression(node: Babel.Node | null | undefined): Babel.CallExpression | null {
+  let curr = unwrapExpression(node);
+  while (
+    curr &&
+    (curr.type === 'AwaitExpression' ||
+      (curr.type === 'UnaryExpression' && curr.operator === 'void'))
+  ) {
+    curr = unwrapExpression(curr.argument);
+  }
+  if (curr && curr.type === 'CallExpression') {
+    return curr;
+  }
+  return null;
+}
+
+export function isSingleZeroArgCall(callbackNode: Babel.Node): string | null {
+  if (
+    callbackNode.type !== 'ArrowFunctionExpression' &&
+    callbackNode.type !== 'FunctionExpression'
+  ) {
+    return null;
+  }
+  if (callbackNode.params.length > 0) return null;
+
+  const body = callbackNode.body;
+  if (body.type !== 'BlockStatement') {
+    const expr = unwrapExpression(body);
+    if (
+      expr &&
+      expr.type === 'CallExpression' &&
+      expr.callee.type === 'Identifier' &&
+      expr.arguments.length === 0
+    ) {
+      return expr.callee.name;
+    }
+    return null;
+  }
+
+  if (body.body.length === 1) {
+    const stmt = body.body[0];
+    let expr: Babel.Node | null | undefined = null;
+    if (stmt.type === 'ExpressionStatement') {
+      expr = unwrapExpression(stmt.expression);
+    } else if (stmt.type === 'ReturnStatement' && stmt.argument) {
+      expr = unwrapExpression(stmt.argument);
+    }
+    if (
+      expr &&
+      expr.type === 'CallExpression' &&
+      expr.callee.type === 'Identifier' &&
+      expr.arguments.length === 0
+    ) {
+      return expr.callee.name;
+    }
+  }
+
   return null;
 }
 
@@ -511,18 +777,25 @@ export function extractCalledFunctions(callbackNode: Babel.Node): string[] {
 
   const body = callbackNode.body;
 
-  if (body.type === 'CallExpression' && body.callee.type === 'Identifier') {
-    fns.push(body.callee.name);
+  if (body.type !== 'BlockStatement') {
+    const callExpr = unwrapCallExpression(body);
+    if (callExpr && callExpr.callee.type === 'Identifier') {
+      fns.push(callExpr.callee.name);
+    }
     return fns;
   }
 
   if (body.type === 'BlockStatement') {
     for (const stmt of body.body) {
-      if (stmt.type === 'ExpressionStatement' && stmt.expression.type === 'CallExpression') {
-        const callee = stmt.expression.callee;
-        if (callee.type === 'Identifier') {
-          fns.push(callee.name);
-        }
+      let exprNode: Babel.Node | null | undefined = null;
+      if (stmt.type === 'ExpressionStatement') {
+        exprNode = stmt.expression;
+      } else if (stmt.type === 'ReturnStatement' && stmt.argument) {
+        exprNode = stmt.argument;
+      }
+      const callExpr = unwrapCallExpression(exprNode);
+      if (callExpr && callExpr.callee.type === 'Identifier') {
+        fns.push(callExpr.callee.name);
       }
     }
   }
@@ -563,6 +836,36 @@ function checkBlockHasReturnValue(body: Babel.BlockStatement): boolean {
   return found;
 }
 
+function checkBlockHasReturnOrThrow(root: Babel.Node): boolean {
+  let found = false;
+  function walk(node: Babel.Node): void {
+    if (found) return;
+    if (
+      node.type === 'ArrowFunctionExpression' ||
+      node.type === 'FunctionExpression' ||
+      node.type === 'FunctionDeclaration'
+    ) return;
+    if (node.type === 'ReturnStatement' || node.type === 'ThrowStatement') {
+      found = true;
+      return;
+    }
+    for (const key of Object.keys(node)) {
+      const val = (node as any)[key];
+      if (val && typeof val === 'object' && typeof val.type === 'string') {
+        walk(val);
+      } else if (Array.isArray(val)) {
+        for (const item of val) {
+          if (item && typeof item === 'object' && typeof item.type === 'string') {
+            walk(item);
+          }
+        }
+      }
+    }
+  }
+  walk(root);
+  return found;
+}
+
 /**
  * Walk the parent chain to find statement bounds and whether it needs bracing.
  * getStatementParent() skips bare bodies (direct IfStatement.consequent etc.),
@@ -572,6 +875,8 @@ interface StatementInfo {
   stmtStart: number;
   stmtEnd: number;
   needsBracing: boolean;
+  isReturnOrThrow: boolean;
+  isArrowExprBody: boolean;
 }
 
 const BRACING_PARENT_TYPES = new Set([
@@ -589,20 +894,60 @@ function findStatementInfo(path: any): StatementInfo | null {
 
     const parentNode = parentPath.node;
 
+    if (
+      parentNode.type === 'ArrowFunctionExpression' &&
+      parentNode.body === node &&
+      node.type !== 'BlockStatement'
+    ) {
+      const span = exprBodySpan(parentNode);
+      return {
+        stmtStart: span.start,
+        stmtEnd: span.end,
+        needsBracing: false,
+        isReturnOrThrow: false,
+        isArrowExprBody: true,
+      };
+    }
+
     if (BRACING_PARENT_TYPES.has(parentNode.type) && node.type !== 'BlockStatement') {
       const isBareBody = parentNode.type === 'IfStatement'
         ? parentNode.consequent === node || parentNode.alternate === node
         : parentNode.body === node;
 
       if (isBareBody) {
-        return { stmtStart: node.start, stmtEnd: node.end, needsBracing: true };
+        const isReturnOrThrow =
+          node.type === 'ReturnStatement' ||
+          node.type === 'ThrowStatement' ||
+          (BRACING_PARENT_TYPES.has(node.type) && checkBlockHasReturnOrThrow(node));
+        return {
+          stmtStart: node.start,
+          stmtEnd: node.end,
+          needsBracing: true,
+          isReturnOrThrow,
+          isArrowExprBody: false,
+        };
       }
     }
 
-    if (parentNode.type === 'BlockStatement' || parentNode.type === 'Program') {
-      const stmt = path.getStatementParent();
-      if (stmt) {
-        return { stmtStart: stmt.node.start, stmtEnd: stmt.node.end, needsBracing: false };
+    if (
+      parentNode.type === 'BlockStatement' ||
+      parentNode.type === 'Program' ||
+      parentNode.type === 'SwitchCase'
+    ) {
+      const stmtNode = node;
+      if (stmtNode) {
+        const isReturnOrThrow =
+          stmtNode.type === 'ReturnStatement' ||
+          stmtNode.type === 'ThrowStatement' ||
+          ((BRACING_PARENT_TYPES.has(stmtNode.type) || stmtNode.type === 'SwitchStatement') &&
+            checkBlockHasReturnOrThrow(stmtNode));
+        return {
+          stmtStart: stmtNode.start,
+          stmtEnd: stmtNode.end,
+          needsBracing: false,
+          isReturnOrThrow,
+          isArrowExprBody: false,
+        };
       }
       return null;
     }
@@ -612,7 +957,15 @@ function findStatementInfo(path: any): StatementInfo | null {
 
   const stmt = path.getStatementParent();
   if (stmt) {
-    return { stmtStart: stmt.node.start, stmtEnd: stmt.node.end, needsBracing: false };
+    const isReturnOrThrow =
+      stmt.node.type === 'ReturnStatement' || stmt.node.type === 'ThrowStatement';
+    return {
+      stmtStart: stmt.node.start,
+      stmtEnd: stmt.node.end,
+      needsBracing: false,
+      isReturnOrThrow,
+      isArrowExprBody: false,
+    };
   }
   return null;
 }
@@ -657,10 +1010,11 @@ export function detectClosureVars(
 }
 
 export function evaluateNumericExpression(
-  node: Babel.Node | null | undefined,
+  rawNode: Babel.Node | null | undefined,
   scope: any,
   visited = new Set<any>(),
 ): number | null {
+  const node = unwrapExpression(rawNode);
   if (!node || visited.has(node)) return null;
   visited.add(node);
 
@@ -694,6 +1048,34 @@ export function evaluateNumericExpression(
     }
   }
 
+  if (node.type === 'CallExpression') {
+    if (node.callee.type === 'Identifier' && node.callee.name === 'Number' && node.arguments.length === 1) {
+      return evaluateNumericExpression(node.arguments[0], scope, visited);
+    }
+    if (
+      node.callee.type === 'MemberExpression' &&
+      node.callee.object.type === 'Identifier' &&
+      node.callee.object.name === 'Math' &&
+      node.callee.property.type === 'Identifier'
+    ) {
+      const args: number[] = [];
+      for (const arg of node.arguments) {
+        const v = evaluateNumericExpression(arg, scope, visited);
+        if (v === null) return null;
+        args.push(v);
+      }
+      const fn = node.callee.property.name;
+      if (fn === 'floor' && args.length === 1) return Math.floor(args[0]);
+      if (fn === 'ceil' && args.length === 1) return Math.ceil(args[0]);
+      if (fn === 'round' && args.length === 1) return Math.round(args[0]);
+      if (fn === 'abs' && args.length === 1) return Math.abs(args[0]);
+      if (fn === 'max' && args.length >= 1) return Math.max(...args);
+      if (fn === 'min' && args.length >= 1) return Math.min(...args);
+      if (fn === 'pow' && args.length === 2) return Math.pow(args[0], args[1]);
+    }
+    return null;
+  }
+
   if (node.type === 'Identifier') {
     const binding = scope?.getBinding?.(node.name);
     if (binding && binding.path?.isVariableDeclarator?.()) {
@@ -708,11 +1090,16 @@ export function evaluateNumericExpression(
   return null;
 }
 
-export function extractPatternTargets(node: Babel.Node | null | undefined): Babel.Node[] {
+export function extractPatternTargets(rawNode: Babel.Node | null | undefined): Babel.Node[] {
   const targets: Babel.Node[] = [];
-  function collect(n: Babel.Node | null | undefined) {
+  function collect(raw: Babel.Node | null | undefined) {
+    const n = unwrapExpression(raw);
     if (!n) return;
-    if (n.type === 'Identifier' || n.type === 'MemberExpression') {
+    if (
+      n.type === 'Identifier' ||
+      n.type === 'MemberExpression' ||
+      n.type === 'OptionalMemberExpression'
+    ) {
       targets.push(n);
     } else if (n.type === 'ArrayPattern') {
       for (const elem of n.elements) {
@@ -732,7 +1119,7 @@ export function extractPatternTargets(node: Babel.Node | null | undefined): Babe
       collect(n.argument);
     }
   }
-  collect(node);
+  collect(rawNode);
   return targets;
 }
 
@@ -756,9 +1143,10 @@ export function findAsyncIIFEs(
           isExpressionBody: false,
         });
       } else {
+        const span = exprBodySpan(fn);
         iifes.push({
-          bodyStart: fnBody.start!,
-          bodyEnd: fnBody.end!,
+          bodyStart: span.start,
+          bodyEnd: span.end,
           isExpressionBody: true,
         });
       }

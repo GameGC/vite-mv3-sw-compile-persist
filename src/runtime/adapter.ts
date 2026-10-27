@@ -8,12 +8,15 @@ import type {
 export function buildAdapterBlock(
   analysis: AnalysisResult,
   opts: ResolvedOptions,
+  insertPos?: number,
 ): string {
   const { topVars, timerCalls, functionDecls } = analysis;
   const varNames = topVars.map((v) => v.name);
   const booleanVars = topVars.filter((v) => v.isBoolean);
   const useProxy = opts.stateStrategy === 'proxy';
-  const objectVars = topVars.filter((v) => v.isObject);
+  const objectVars = topVars.filter(
+    (v) => v.isObject && (insertPos === undefined || (v.stmtEnd ?? v.end) <= insertPos),
+  );
 
   const getVarCases = topVars
     .map((v) => `      case '${v.name}': return ${v.name};`)
@@ -36,7 +39,11 @@ export function buildAdapterBlock(
     .map((v) => `      case '${v.name}': return { [prefix + '${v.name}']: __mv3_serialize(${v.name}, '${v.collectionType ?? ''}') };`)
     .join('\n');
 
-  const fnRegistryCalls = functionDecls
+  const earlyFunctionDecls = functionDecls.filter(
+    (f) => f.isHoisted !== false || insertPos === undefined || f.end === undefined || f.end <= insertPos,
+  );
+
+  const fnRegistryCalls = earlyFunctionDecls
     .map((f) => {
       if (f.boundCode) {
         return `__mv3_registerFn('${f.name}', ${f.boundCode});`;

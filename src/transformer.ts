@@ -7,7 +7,7 @@ import type {
   TopVarInfo,
 } from './types.js';
 
-import { analyze } from './analyzer.js';
+import { analyze, unwrapTopLevelNode, unwrapExpression } from './analyzer.js';
 import { buildVirtualRuntime } from './runtime/virtual-module.js';
 import { buildAdapterBlock } from './runtime/adapter.js';
 
@@ -23,24 +23,104 @@ const DECL_TYPES = new Set([
   'TSInterfaceDeclaration',
   'TSTypeAliasDeclaration',
   'TSModuleDeclaration',
+  'ExportAllDeclaration',
 ]);
+
+function hasImpureTopLevelCall(node: Babel.Node): boolean {
+  let impure = false;
+  function walk(n: Babel.Node | null | undefined) {
+    if (!n || impure) return;
+    if (
+      n.type === 'FunctionExpression' ||
+      n.type === 'ArrowFunctionExpression' ||
+      n.type === 'FunctionDeclaration' ||
+      n.type === 'ClassExpression' ||
+      n.type === 'ClassDeclaration'
+    ) {
+      return;
+    }
+    if (n.type === 'CallExpression') {
+      const callee = unwrapExpression(n.callee) || n.callee;
+      if (
+        callee.type === 'MemberExpression' &&
+        callee.property.type === 'Identifier' &&
+        callee.property.name === 'bind'
+      ) {
+        // .bind() is pure
+      } else if (
+        callee.type === 'MemberExpression' &&
+        callee.object.type === 'Identifier' &&
+        callee.property.type === 'Identifier' &&
+        ((callee.object.name === 'Object' &&
+          ['create', 'assign', 'fromEntries', 'keys', 'values', 'entries', 'freeze'].includes(callee.property.name)) ||
+          (callee.object.name === 'Array' && ['from', 'of', 'isArray'].includes(callee.property.name)) ||
+          callee.object.name === 'Math')
+      ) {
+        // Pure built-in factory/math call
+      } else if (
+        callee.type === 'Identifier' &&
+        ['Boolean', 'Number', 'String', 'Symbol', 'BigInt', 'RegExp'].includes(callee.name)
+      ) {
+        // Pure primitive conversion
+      } else {
+        impure = true;
+        return;
+      }
+    }
+    for (const key of Object.keys(n)) {
+      const val = (n as any)[key];
+      if (val && typeof val === 'object' && typeof val.type === 'string') {
+        walk(val);
+      } else if (Array.isArray(val)) {
+        for (const item of val) {
+          if (item && typeof item === 'object' && typeof item.type === 'string') {
+            walk(item);
+          }
+        }
+      }
+    }
+  }
+  walk(node);
+  return impure;
+}
 
 export function findInsertPosition(topVars: TopVarInfo[], ast: Babel.File): number {
   if (topVars.length === 0) return 0;
 
   let lastDeclEnd = 0;
-  for (const node of ast.program.body) {
-    if (DECL_TYPES.has(node.type)) {
-      if (node.end! > lastDeclEnd) {
-        lastDeclEnd = node.end!;
+  for (const rawNode of ast.program.body) {
+    const node = unwrapTopLevelNode(rawNode);
+    const isPureExport =
+      (rawNode.type === 'ExportNamedDeclaration' && !rawNode.declaration) ||
+      rawNode.type === 'ExportAllDeclaration';
+
+    if (isPureExport) {
+      if (rawNode.end! > lastDeclEnd) {
+        lastDeclEnd = rawNode.end!;
       }
+      continue;
+    }
+
+    if (DECL_TYPES.has(node.type)) {
+      if (node.type === 'VariableDeclaration' && hasImpureTopLevelCall(node)) {
+        // Stop before a VariableDeclaration whose initializer executes an impure function call
+        // (e.g., const init = helper(); or const t = setTimeout(...);)
+        break;
+      }
+      if (rawNode.end! > lastDeclEnd) {
+        lastDeclEnd = rawNode.end!;
+      }
+    } else {
+      // Stop advancing when we encounter the first top-level executable statement
+      // so __mv3_* runtime bindings are initialized before any top-level code executes.
+      break;
     }
   }
 
   if (lastDeclEnd > 0) return lastDeclEnd;
 
-  const lastVar = topVars[topVars.length - 1];
-  return lastVar.end;
+  const firstVar = topVars[0];
+  return firstVar.stmtEnd ?? firstVar.end;
 }
 
 // --- applyTransform ---
@@ -56,28 +136,70 @@ export function applyTransform(
   const virtualRuntimeCode = buildVirtualRuntime(analysis, opts);
   setVirtualRuntime(virtualRuntimeCode);
 
-  const adapterBlock = buildAdapterBlock(analysis, opts);
+  const insertPos = findInsertPosition(analysis.topVars, analysis.ast);
+  const adapterBlock = buildAdapterBlock(analysis, opts, insertPos);
 
   s.prepend(`import { createMV3Runtime } from 'virtual:mv3-persist-runtime';\n`);
 
-  const insertPos = findInsertPosition(analysis.topVars, analysis.ast);
   s.appendRight(insertPos, adapterBlock);
+
+  // Register any non-hoisted function declarations (const fn = () => ..., const bound = x.bind(y))
+  // that appear after insertPos right after their declaration to avoid TDZ ReferenceError.
+  for (const fnDecl of analysis.functionDecls) {
+    if (fnDecl.isHoisted === false && fnDecl.end !== undefined && fnDecl.end > insertPos) {
+      const regCode = fnDecl.boundCode
+        ? `__mv3_registerFn('${fnDecl.name}', ${fnDecl.boundCode});`
+        : `__mv3_registerFn('${fnDecl.name}', ${fnDecl.name});`;
+      s.appendRight(fnDecl.end, `\n${regCode}`);
+    }
+  }
+
+  // Wrap any object persistent variables declared after insertPos in __mv3_reactive right after their declaration.
+  if (opts.stateStrategy === 'proxy') {
+    for (const v of analysis.topVars) {
+      const varStmtEnd = v.stmtEnd ?? v.end;
+      if (v.isObject && varStmtEnd > insertPos) {
+        s.appendRight(varStmtEnd, `\n${v.name} = __mv3_reactive(${v.name}, '${v.name}');`);
+      }
+    }
+  }
+
+  // Track expression-body arrow functions that have state mutations so handler wrapping and markDirty wrapping compose cleanly.
+  const arrowExprBodySpans = new Set<string>();
+  for (const asgn of analysis.assignments) {
+    if (asgn.isArrowExprBody) {
+      arrowExprBodySpans.add(`${asgn.stmtStart}:${asgn.stmtEnd}`);
+    }
+  }
+  const handlerExprBodySpans = new Set<string>();
 
   // Inject await __mv3_init + async in event handlers.
   // Handlers with return values (onMessage return-true, blocking webRequest) must NOT be made async.
   for (const handler of analysis.handlers) {
     if (handler.isAsync) {
       if (handler.isExpressionBody) {
-        const exprCode = code.slice(handler.bodyStart, handler.bodyEnd);
-        s.overwrite(handler.bodyStart, handler.bodyEnd, `{ await __mv3_init; return ${exprCode}; }`);
+        const spanKey = `${handler.bodyStart}:${handler.bodyEnd}`;
+        handlerExprBodySpans.add(spanKey);
+        if (arrowExprBodySpans.has(spanKey)) {
+          s.appendLeft(handler.bodyStart, '{ await __mv3_init; ');
+        } else {
+          s.appendLeft(handler.bodyStart, '{ await __mv3_init; return ');
+          s.appendRight(handler.bodyEnd, '; }');
+        }
       } else {
         s.appendRight(handler.bodyStart, '\nawait __mv3_init;');
       }
     } else if (!handler.hasReturnValue) {
       s.appendLeft(handler.asyncInsertPos, 'async ');
       if (handler.isExpressionBody) {
-        const exprCode = code.slice(handler.bodyStart, handler.bodyEnd);
-        s.overwrite(handler.bodyStart, handler.bodyEnd, `{ await __mv3_init; return ${exprCode}; }`);
+        const spanKey = `${handler.bodyStart}:${handler.bodyEnd}`;
+        handlerExprBodySpans.add(spanKey);
+        if (arrowExprBodySpans.has(spanKey)) {
+          s.appendLeft(handler.bodyStart, '{ await __mv3_init; ');
+        } else {
+          s.appendLeft(handler.bodyStart, '{ await __mv3_init; return ');
+          s.appendRight(handler.bodyEnd, '; }');
+        }
       } else {
         s.appendRight(handler.bodyStart, '\nawait __mv3_init;');
       }
@@ -87,8 +209,14 @@ export function applyTransform(
       if (handler.asyncIIFEs && handler.asyncIIFEs.length > 0) {
         for (const iife of handler.asyncIIFEs) {
           if (iife.isExpressionBody) {
-            const exprCode = code.slice(iife.bodyStart, iife.bodyEnd);
-            s.overwrite(iife.bodyStart, iife.bodyEnd, `{ await __mv3_init; return ${exprCode}; }`);
+            const spanKey = `${iife.bodyStart}:${iife.bodyEnd}`;
+            handlerExprBodySpans.add(spanKey);
+            if (arrowExprBodySpans.has(spanKey)) {
+              s.appendLeft(iife.bodyStart, '{ await __mv3_init; ');
+            } else {
+              s.appendLeft(iife.bodyStart, '{ await __mv3_init; return ');
+              s.appendRight(iife.bodyEnd, '; }');
+            }
           } else {
             s.appendRight(iife.bodyStart, '\nawait __mv3_init;');
           }
@@ -113,6 +241,7 @@ export function applyTransform(
   for (const tc of sortedTimers) {
     const wrapper =
       tc.type === 'setTimeout' ? '__mv3_setTimeout' : '__mv3_setInterval';
+    const calleeEnd = tc.calleeEnd ?? (tc.start + tc.type.length);
 
     if (tc.category === 'promise-resolver') {
       console.warn(
@@ -130,7 +259,7 @@ export function applyTransform(
       } else {
         const promiseWrapper =
           tc.type === 'setTimeout' ? '__mv3_setTimeoutPromise' : '__mv3_setIntervalPromise';
-        s.overwrite(tc.start, tc.start + tc.type.length, promiseWrapper);
+        s.overwrite(tc.start, calleeEnd, promiseWrapper);
         continue;
       }
     }
@@ -140,7 +269,11 @@ export function applyTransform(
       const newCall = `${wrapper}(${tc.innerFnName}, ${delayCode})`;
       s.overwrite(tc.start, tc.end, newCall);
     } else {
-      s.overwrite(tc.start, tc.start + tc.type.length, wrapper);
+      s.overwrite(tc.start, calleeEnd, wrapper);
+
+      if (tc.recoveryFnName && tc.category !== 'named-ref') {
+        s.appendLeft(tc.delayNode.end!, `, '${tc.recoveryFnName}'`);
+      }
 
       if (tc.category === 'complex-with-closure' && tc.recoveryFnName) {
         console.warn(
@@ -164,27 +297,31 @@ export function applyTransform(
   }
 
   // Inject __mv3_markDirty after assignments/mutations.
-  // Group by stmtEnd so bracing is applied once per statement.
+  // Group by full statement identity so outer constructs and inner bare bodies sharing stmtEnd do not collide.
   const sortedAssignments = [...analysis.assignments]
-    .sort((a, b) => b.stmtEnd - a.stmtEnd);
+    .sort((a, b) => b.stmtEnd - a.stmtEnd || b.stmtStart - a.stmtStart);
 
   const objectVarNames = new Set(
     analysis.topVars.filter((v) => v.isObject).map((v) => v.name),
   );
 
-  const stmtEndGroups = new Map<number, typeof sortedAssignments>();
+  const stmtGroups = new Map<string, typeof sortedAssignments>();
   for (const asgn of sortedAssignments) {
-    const group = stmtEndGroups.get(asgn.stmtEnd) || [];
+    const key = `${asgn.stmtStart}:${asgn.stmtEnd}:${asgn.needsBracing}:${Boolean(asgn.isReturnOrThrow)}:${Boolean(asgn.isArrowExprBody)}`;
+    const group = stmtGroups.get(key) || [];
     group.push(asgn);
-    stmtEndGroups.set(asgn.stmtEnd, group);
+    stmtGroups.set(key, group);
   }
 
-  const sortedGroups = [...stmtEndGroups.entries()].sort((a, b) => b[0] - a[0]);
+  const sortedGroups = [...stmtGroups.values()].sort(
+    (a, b) => b[0].stmtEnd - a[0].stmtEnd || b[0].stmtStart - a[0].stmtStart,
+  );
 
-  for (const [stmtEnd, group] of sortedGroups) {
+  for (const group of sortedGroups) {
+    const firstAsgn = group[0];
+    const stmtEnd = firstAsgn.stmtEnd;
     const charBefore = code[stmtEnd - 1];
     const sep = charBefore === ';' || charBefore === '}' ? '' : ';';
-    const firstAsgn = group[0];
     const needsBracing = firstAsgn.needsBracing;
 
     let injection = '';
@@ -196,7 +333,24 @@ export function applyTransform(
       injection += ` __mv3_markDirty('${asgn.varName}');`;
     }
 
-    if (needsBracing) {
+    if (firstAsgn.isArrowExprBody) {
+      const spanKey = `${firstAsgn.stmtStart}:${stmtEnd}`;
+      if (handlerExprBodySpans.has(spanKey)) {
+        s.appendLeft(firstAsgn.stmtStart, 'try { return ');
+        s.appendRight(stmtEnd, `; } finally {${injection} } }`);
+      } else {
+        s.appendLeft(firstAsgn.stmtStart, '{ try { return ');
+        s.appendRight(stmtEnd, `; } finally {${injection} } }`);
+      }
+    } else if (firstAsgn.isReturnOrThrow) {
+      if (needsBracing) {
+        s.appendLeft(firstAsgn.stmtStart, '{ try { ');
+        s.appendRight(stmtEnd, `${sep} } finally {${injection} } }`);
+      } else {
+        s.appendLeft(firstAsgn.stmtStart, 'try { ');
+        s.appendRight(stmtEnd, `${sep} } finally {${injection} }`);
+      }
+    } else if (needsBracing) {
       // Wrap bare if/for/while body in braces so markDirty stays inside the branch.
       s.appendLeft(firstAsgn.stmtStart, '{ ');
       s.appendRight(stmtEnd, `${sep}${injection} }`);

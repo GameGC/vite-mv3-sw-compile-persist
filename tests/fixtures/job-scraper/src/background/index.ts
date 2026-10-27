@@ -77,6 +77,7 @@ async function processQueue(): Promise<void> {
   try {
     tabs[platform.tabKey] = await refreshTab(platform, true);
     processTimeout = setTimeout(() => {
+      console.log(`[Queue] ⚠️ Timeout reached for ${platform.id}. Unlocking queue for next item.`);
       unlockQueue();
     }, MAX_PROCESS_TIME_MS);
     await Browser.storage.local.set(tabs);

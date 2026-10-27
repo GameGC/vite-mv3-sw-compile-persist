@@ -59,12 +59,14 @@ export interface TopVarInfo {
   collectionType?: 'map' | 'set' | 'date' | 'array';
   start: number;
   end: number;
+  stmtEnd?: number;
 }
 
 export interface TimerCallInfo {
   type: 'setTimeout' | 'setInterval';
   start: number;
   end: number;
+  calleeEnd?: number;
   callbackNode: Babel.Node;
   callbackStart: number;
   callbackEnd: number;
@@ -112,11 +114,17 @@ export interface AssignmentInfo {
   needsBracing: boolean;
   /** obj = {...} (true) vs obj.prop = 5 / obj.push(x) (false). */
   isFullReassignment: boolean;
+  /** Mutation inside return/throw statement or loop/branch header with early return/throw. */
+  isReturnOrThrow?: boolean;
+  /** Mutation is the direct expression body of an ArrowFunctionExpression. */
+  isArrowExprBody?: boolean;
 }
 
 export interface FunctionDeclInfo {
   name: string;
   boundCode?: string;
+  end?: number;
+  isHoisted?: boolean;
 }
 
 export interface AnalysisResult {

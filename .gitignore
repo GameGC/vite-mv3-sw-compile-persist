@@ -162,3 +162,5 @@ dist
 .yarn/install-state.gz
 .pnp.*
 /.agents
+/tests/fixtures/job-scraper/dist_chrome
+/tests/fixtures/job-scraper/dist_firefox
