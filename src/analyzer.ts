@@ -8,6 +8,7 @@ import type {
   TopVarInfo,
   TimerCallInfo,
   ClearTimerInfo,
+  ClearAllInfo,
   HandlerInfo,
   AssignmentInfo,
   FunctionDeclInfo,
@@ -45,6 +46,7 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
   const topVars: TopVarInfo[] = [];
   const timerCalls: TimerCallInfo[] = [];
   const clearTimerCalls: ClearTimerInfo[] = [];
+  const clearAllCalls: ClearAllInfo[] = [];
   const handlers: HandlerInfo[] = [];
   const assignments: AssignmentInfo[] = [];
   const functionDecls: FunctionDeclInfo[] = [];
@@ -178,7 +180,7 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
   const isInsidePromiseResolver = new WeakSet<Babel.Node>();
 
   traverse(ast, {
-    NewExpression(path) {
+    NewExpression(path: any) {
       if (path.node.callee.type !== 'Identifier') return;
       if (path.node.callee.name !== 'Promise') return;
 
@@ -195,7 +197,7 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
       isInsidePromiseResolver.add(executor);
     },
 
-    CallExpression(path) {
+    CallExpression(path: any) {
       const callee = path.node.callee;
 
       // setTimeout / setInterval
@@ -257,34 +259,10 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
             }
           }
 
-          let delayIsNumeric = false;
-          let delayValue: number | null = null;
-          if (delayArg.type === 'NumericLiteral') {
-            delayIsNumeric = true;
-            delayValue = delayArg.value;
-          } else if (
-            delayArg.type === 'BinaryExpression' &&
-            delayArg.operator === '*'
-          ) {
-            const evalNum = (node: Babel.Node): number | null => {
-              if (node.type === 'NumericLiteral') return node.value;
-              if (
-                node.type === 'BinaryExpression' &&
-                node.operator === '*' &&
-                node.left && node.right
-              ) {
-                const l = evalNum(node.left);
-                const r = evalNum(node.right);
-                if (l !== null && r !== null) return l * r;
-              }
-              return null;
-            };
-            const result = evalNum(delayArg);
-            if (result !== null) {
-              delayIsNumeric = true;
-              delayValue = result;
-            }
-          }
+          const evaluatedDelay = evaluateNumericExpression(delayArg, path.scope);
+          const delayIsNumeric = evaluatedDelay !== null;
+          const delayValue = evaluatedDelay;
+          const isAlarm = evaluatedDelay !== null ? evaluatedDelay >= opts.alarmThresholdMs : undefined;
 
           timerCalls.push({
             type: callee.name as 'setTimeout' | 'setInterval',
@@ -299,6 +277,7 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
             innerFnName,
             delayIsNumeric,
             delayValue,
+            isAlarm,
           });
           return;
         }
@@ -316,6 +295,38 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
             start: path.node.start!,
             end: path.node.end!,
             argCode,
+          });
+          return;
+        }
+      }
+
+      // Intercept chrome.alarms.clearAll(), browser.alarms.clearAll(), Browser.alarms.clearAll(), alarms.clearAll()
+      if (
+        callee.type === 'MemberExpression' &&
+        callee.property.type === 'Identifier' &&
+        callee.property.name === 'clearAll'
+      ) {
+        const obj = callee.object;
+        let isAlarmsClearAll = false;
+        if (
+          obj.type === 'MemberExpression' &&
+          obj.property.type === 'Identifier' &&
+          obj.property.name === 'alarms' &&
+          obj.object.type === 'Identifier' &&
+          ['chrome', 'browser', 'Browser'].includes(obj.object.name)
+        ) {
+          isAlarmsClearAll = true;
+        } else if (
+          obj.type === 'Identifier' &&
+          obj.name === 'alarms'
+        ) {
+          isAlarmsClearAll = true;
+        }
+
+        if (isAlarmsClearAll) {
+          clearAllCalls.push({
+            start: path.node.start!,
+            end: path.node.end!,
           });
           return;
         }
@@ -358,6 +369,8 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
             hasReturnValue = checkBlockHasReturnValue(body);
           }
 
+          const asyncIIFEs = findAsyncIIFEs(callback.body);
+
           handlers.push({
             bodyStart,
             bodyEnd,
@@ -365,6 +378,7 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
             asyncInsertPos,
             isExpressionBody,
             hasReturnValue,
+            asyncIIFEs,
           });
         }
       }
@@ -379,6 +393,8 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
         } else {
           const rootName = resolveRootIdentifier(callee.object);
           if (rootName && persistentVarNames.has(rootName)) {
+            const binding = path.scope.getBinding(rootName);
+            if (!binding || binding.scope.block.type !== 'Program') return;
             const info = findStatementInfo(path);
             if (info) {
               const existing = assignments.find(
@@ -399,24 +415,59 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
       }
     },
 
-    AssignmentExpression(path) {
+    AssignmentExpression(path: any) {
       const left = path.node.left;
-      const rootName = resolveRootIdentifier(left);
+      const targets = extractPatternTargets(left);
+      for (const target of targets) {
+        const rootName = resolveRootIdentifier(target);
+        if (rootName && persistentVarNames.has(rootName)) {
+          const binding = path.scope.getBinding(rootName);
+          if (!binding || binding.scope.block.type !== 'Program') continue;
+          const info = findStatementInfo(path);
+          if (info) {
+            const isFullReassignment = target.type === 'Identifier';
+            const existing = assignments.find(
+              (a) => a.varName === rootName && a.stmtEnd === info.stmtEnd,
+            );
+            if (!existing) {
+              assignments.push({
+                varName: rootName,
+                stmtEnd: info.stmtEnd,
+                stmtStart: info.stmtStart,
+                needsBracing: info.needsBracing,
+                isFullReassignment,
+              });
+            } else if (!existing.isFullReassignment && isFullReassignment) {
+              existing.isFullReassignment = true;
+            }
+          }
+        }
+      }
+    },
+
+    UpdateExpression(path: any) {
+      const arg = path.node.argument;
+      const rootName = resolveRootIdentifier(arg);
       if (rootName && persistentVarNames.has(rootName)) {
-        const info = findStatementInfo(path);
-        if (info) {
-          const existing = assignments.find(
-            (a) => a.varName === rootName && a.stmtEnd === info.stmtEnd,
-          );
-          if (!existing) {
-            const isFullReassignment = left.type === 'Identifier';
-            assignments.push({
-              varName: rootName,
-              stmtEnd: info.stmtEnd,
-              stmtStart: info.stmtStart,
-              needsBracing: info.needsBracing,
-              isFullReassignment,
-            });
+        const binding = path.scope.getBinding(rootName);
+        if (binding && binding.scope.block.type === 'Program') {
+          const info = findStatementInfo(path);
+          if (info) {
+            const isFullReassignment = arg.type === 'Identifier';
+            const existing = assignments.find(
+              (a) => a.varName === rootName && a.stmtEnd === info.stmtEnd,
+            );
+            if (!existing) {
+              assignments.push({
+                varName: rootName,
+                stmtEnd: info.stmtEnd,
+                stmtStart: info.stmtStart,
+                needsBracing: info.needsBracing,
+                isFullReassignment,
+              });
+            } else if (!existing.isFullReassignment && isFullReassignment) {
+              existing.isFullReassignment = true;
+            }
           }
         }
       }
@@ -427,6 +478,7 @@ export function analyze(code: string, opts: ResolvedOptions): AnalysisResult {
     topVars,
     timerCalls,
     clearTimerCalls,
+    clearAllCalls,
     handlers,
     assignments,
     functionDecls,
@@ -602,4 +654,134 @@ export function detectClosureVars(
   });
 
   return hasClosure;
+}
+
+export function evaluateNumericExpression(
+  node: Babel.Node | null | undefined,
+  scope: any,
+  visited = new Set<any>(),
+): number | null {
+  if (!node || visited.has(node)) return null;
+  visited.add(node);
+
+  if (node.type === 'NumericLiteral') {
+    return node.value;
+  }
+
+  if (node.type === 'UnaryExpression') {
+    if (node.operator === '+' || node.operator === '-') {
+      const val = evaluateNumericExpression(node.argument, scope, visited);
+      if (val !== null) {
+        return node.operator === '-' ? -val : +val;
+      }
+    }
+    return null;
+  }
+
+  if (node.type === 'BinaryExpression') {
+    const leftVal = evaluateNumericExpression(node.left, scope, visited);
+    const rightVal = evaluateNumericExpression(node.right, scope, visited);
+    if (leftVal === null || rightVal === null) return null;
+
+    switch (node.operator) {
+      case '+': return leftVal + rightVal;
+      case '-': return leftVal - rightVal;
+      case '*': return leftVal * rightVal;
+      case '/': return rightVal !== 0 ? leftVal / rightVal : null;
+      case '%': return rightVal !== 0 ? leftVal % rightVal : null;
+      case '**': return leftVal ** rightVal;
+      default: return null;
+    }
+  }
+
+  if (node.type === 'Identifier') {
+    const binding = scope?.getBinding?.(node.name);
+    if (binding && binding.path?.isVariableDeclarator?.()) {
+      const init = binding.path.node.init;
+      if (init) {
+        return evaluateNumericExpression(init, binding.scope, visited);
+      }
+    }
+    return null;
+  }
+
+  return null;
+}
+
+export function extractPatternTargets(node: Babel.Node | null | undefined): Babel.Node[] {
+  const targets: Babel.Node[] = [];
+  function collect(n: Babel.Node | null | undefined) {
+    if (!n) return;
+    if (n.type === 'Identifier' || n.type === 'MemberExpression') {
+      targets.push(n);
+    } else if (n.type === 'ArrayPattern') {
+      for (const elem of n.elements) {
+        if (elem) collect(elem);
+      }
+    } else if (n.type === 'ObjectPattern') {
+      for (const prop of n.properties) {
+        if (prop.type === 'ObjectProperty') {
+          collect(prop.value);
+        } else if (prop.type === 'RestElement') {
+          collect(prop.argument);
+        }
+      }
+    } else if (n.type === 'AssignmentPattern') {
+      collect(n.left);
+    } else if (n.type === 'RestElement') {
+      collect(n.argument);
+    }
+  }
+  collect(node);
+  return targets;
+}
+
+export function findAsyncIIFEs(
+  node: Babel.Node,
+): Array<{ bodyStart: number; bodyEnd: number; isExpressionBody: boolean }> {
+  const iifes: Array<{ bodyStart: number; bodyEnd: number; isExpressionBody: boolean }> = [];
+  function walk(n: Babel.Node) {
+    if (!n) return;
+    if (
+      n.type === 'CallExpression' &&
+      (n.callee.type === 'ArrowFunctionExpression' || n.callee.type === 'FunctionExpression') &&
+      n.callee.async
+    ) {
+      const fn = n.callee;
+      const fnBody = fn.body;
+      if (fnBody.type === 'BlockStatement') {
+        iifes.push({
+          bodyStart: fnBody.start! + 1,
+          bodyEnd: fnBody.end! - 1,
+          isExpressionBody: false,
+        });
+      } else {
+        iifes.push({
+          bodyStart: fnBody.start!,
+          bodyEnd: fnBody.end!,
+          isExpressionBody: true,
+        });
+      }
+      return;
+    }
+    for (const key of Object.keys(n)) {
+      if (key === 'callee' && n.type === 'CallExpression') continue;
+      const val = (n as any)[key];
+      if (val && typeof val === 'object' && typeof val.type === 'string') {
+        if (val.type !== 'FunctionDeclaration') {
+          walk(val);
+        }
+      } else if (Array.isArray(val)) {
+        for (const item of val) {
+          if (item && typeof item === 'object' && typeof item.type === 'string') {
+            if (item.type !== 'FunctionDeclaration') {
+              walk(item);
+            }
+          }
+        }
+      }
+    }
+  }
+  walk(node);
+  return iifes;
 }

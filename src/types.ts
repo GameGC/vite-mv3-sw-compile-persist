@@ -74,6 +74,7 @@ export interface TimerCallInfo {
   innerFnName: string | null;
   delayIsNumeric: boolean;
   delayValue: number | null;
+  isAlarm?: boolean;
 }
 
 export interface ClearTimerInfo {
@@ -81,6 +82,11 @@ export interface ClearTimerInfo {
   start: number;
   end: number;
   argCode: string;
+}
+
+export interface ClearAllInfo {
+  start: number;
+  end: number;
 }
 
 export interface HandlerInfo {
@@ -91,6 +97,11 @@ export interface HandlerInfo {
   isExpressionBody: boolean;
   /** True when handler returns a value — must not be made async (breaks onMessage return-true). */
   hasReturnValue: boolean;
+  asyncIIFEs?: Array<{
+    bodyStart: number;
+    bodyEnd: number;
+    isExpressionBody: boolean;
+  }>;
 }
 
 export interface AssignmentInfo {
@@ -112,6 +123,7 @@ export interface AnalysisResult {
   topVars: TopVarInfo[];
   timerCalls: TimerCallInfo[];
   clearTimerCalls: ClearTimerInfo[];
+  clearAllCalls: ClearAllInfo[];
   handlers: HandlerInfo[];
   assignments: AssignmentInfo[];
   functionDecls: FunctionDeclInfo[];

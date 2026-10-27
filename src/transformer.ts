@@ -66,17 +66,43 @@ export function applyTransform(
   // Inject await __mv3_init + async in event handlers.
   // Handlers with return values (onMessage return-true, blocking webRequest) must NOT be made async.
   for (const handler of analysis.handlers) {
-    if (handler.hasReturnValue) continue;
-
-    if (!handler.isAsync) {
+    if (handler.isAsync) {
+      if (handler.isExpressionBody) {
+        const exprCode = code.slice(handler.bodyStart, handler.bodyEnd);
+        s.overwrite(handler.bodyStart, handler.bodyEnd, `{ await __mv3_init; return ${exprCode}; }`);
+      } else {
+        s.appendRight(handler.bodyStart, '\nawait __mv3_init;');
+      }
+    } else if (!handler.hasReturnValue) {
       s.appendLeft(handler.asyncInsertPos, 'async ');
-    }
-    if (handler.isExpressionBody) {
-      const exprCode = code.slice(handler.bodyStart, handler.bodyEnd);
-      s.overwrite(handler.bodyStart, handler.bodyEnd, `{ await __mv3_init; return ${exprCode}; }`);
+      if (handler.isExpressionBody) {
+        const exprCode = code.slice(handler.bodyStart, handler.bodyEnd);
+        s.overwrite(handler.bodyStart, handler.bodyEnd, `{ await __mv3_init; return ${exprCode}; }`);
+      } else {
+        s.appendRight(handler.bodyStart, '\nawait __mv3_init;');
+      }
     } else {
-      s.appendRight(handler.bodyStart, '\nawait __mv3_init;');
+      // Sync handler with return value (e.g. onMessage return true).
+      // Preserve synchronous return, but inject await __mv3_init into any inner async IIFEs.
+      if (handler.asyncIIFEs && handler.asyncIIFEs.length > 0) {
+        for (const iife of handler.asyncIIFEs) {
+          if (iife.isExpressionBody) {
+            const exprCode = code.slice(iife.bodyStart, iife.bodyEnd);
+            s.overwrite(iife.bodyStart, iife.bodyEnd, `{ await __mv3_init; return ${exprCode}; }`);
+          } else {
+            s.appendRight(iife.bodyStart, '\nawait __mv3_init;');
+          }
+        }
+      }
     }
+  }
+
+  // Replace chrome.alarms.clearAll() / browser.alarms.clearAll() / Browser.alarms.clearAll()
+  const sortedClearAlls = [...(analysis.clearAllCalls || [])].sort(
+    (a, b) => b.start - a.start,
+  );
+  for (const ca of sortedClearAlls) {
+    s.overwrite(ca.start, ca.end, '__mv3_clearAllAlarms()');
   }
 
   // Replace setTimeout/setInterval calls
@@ -102,14 +128,9 @@ export function applyTransform(
       if (opts.promiseResolverStrategy === 'alarm') {
         // fall through to normal conversion
       } else {
-        const fullCall = code.slice(tc.start, tc.end);
         const promiseWrapper =
           tc.type === 'setTimeout' ? '__mv3_setTimeoutPromise' : '__mv3_setIntervalPromise';
-        const newCall = fullCall.replace(
-          new RegExp(`\\b${tc.type}\\s*\\(`),
-          promiseWrapper + '(',
-        );
-        s.overwrite(tc.start, tc.end, newCall);
+        s.overwrite(tc.start, tc.start + tc.type.length, promiseWrapper);
         continue;
       }
     }
@@ -118,20 +139,8 @@ export function applyTransform(
       const delayCode = code.slice(tc.delayNode.start!, tc.delayNode.end!);
       const newCall = `${wrapper}(${tc.innerFnName}, ${delayCode})`;
       s.overwrite(tc.start, tc.end, newCall);
-    } else if (tc.category === 'named-ref') {
-      const fullCall = code.slice(tc.start, tc.end);
-      const newCall = fullCall.replace(
-        new RegExp(`\\b${tc.type}\\s*\\(`),
-        wrapper + '(',
-      );
-      s.overwrite(tc.start, tc.end, newCall);
     } else {
-      const fullCall = code.slice(tc.start, tc.end);
-      const newCall = fullCall.replace(
-        new RegExp(`\\b${tc.type}\\s*\\(`),
-        wrapper + '(',
-      );
-      s.overwrite(tc.start, tc.end, newCall);
+      s.overwrite(tc.start, tc.start + tc.type.length, wrapper);
 
       if (tc.category === 'complex-with-closure' && tc.recoveryFnName) {
         console.warn(

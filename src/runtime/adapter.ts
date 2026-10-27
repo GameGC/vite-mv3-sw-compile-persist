@@ -49,7 +49,7 @@ export function buildAdapterBlock(
     if (tc.recoveryFnName) recoveryFns.add(tc.recoveryFnName);
   }
   const recoveryCalls = [...recoveryFns]
-    .filter((fn) => !functionDecls.some((f) => f.name === fn))
+    .filter((fn) => analysis.topLevelBindings.has(fn) && !functionDecls.some((f) => f.name === fn))
     .map((fn) => `__mv3_registerFn('${fn}', ${fn});`);
 
   const allRegistryCalls = [...fnRegistryCalls, ...recoveryCalls]
@@ -77,6 +77,7 @@ const {
   __mv3_setIntervalPromise,
   __mv3_clearTimeout,
   __mv3_clearInterval,
+  __mv3_clearAllAlarms,
   __mv3_reactive,
   __mv3_getVar,
   __mv3_bindMethod,

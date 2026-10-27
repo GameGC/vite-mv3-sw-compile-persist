@@ -2,6 +2,7 @@
  * Shared test utilities for vite-plugin-mv3-persist.
  */
 
+import ts from 'typescript';
 import { mv3Persistent } from '../src/index.js';
 
 let _passed = 0;
@@ -86,3 +87,33 @@ export function transform(code: string, options: TransformOptions = {}): Transfo
     combined: transformedCode + '\n' + virtualModuleCode,
   };
 }
+
+export function compileTestBundle(sourceCode: string, options: TransformOptions = {}): string {
+  const { code, virtualModule } = transform(sourceCode, {
+    strategy: 'proxy',
+    alarmThresholdMs: 60_000,
+    staleLockThresholdMs: 30_000,
+    autoFlushMs: 50,
+    ...options,
+  });
+
+  const inlinedRuntime = virtualModule.replace(
+    'export function createMV3Runtime',
+    'function createMV3Runtime',
+  );
+
+  const bundle = code.replace(
+    /import\s*\{\s*createMV3Runtime\s*\}\s*from\s*['"]virtual:mv3-persist-runtime['"];?/,
+    inlinedRuntime,
+  );
+
+  const jsBundle = ts.transpileModule(bundle, {
+    compilerOptions: {
+      target: ts.ScriptTarget.ES2020,
+      module: ts.ModuleKind.ESNext,
+    },
+  }).outputText;
+
+  return jsBundle;
+}
+

@@ -59,11 +59,15 @@ export function mv3Persistent(userOptions: MV3PersistentOptions = {}): Plugin {
     },
 
     transform(code, id) {
-      const cleanId = id.replace(/\?.*$/, '');
-      const isMatch =
+      const cleanId = id.split('?')[0].replace(/\\/g, '/');
+      const normalizedEntry =
         typeof opts.backgroundEntry === 'string'
-          ? cleanId.includes(opts.backgroundEntry)
-          : opts.backgroundEntry.test(cleanId);
+          ? opts.backgroundEntry.replace(/\\/g, '/')
+          : opts.backgroundEntry;
+      const isMatch =
+        typeof normalizedEntry === 'string'
+          ? cleanId.includes(normalizedEntry) || cleanId.includes(normalizedEntry.replace(/^\.\//, ''))
+          : normalizedEntry.test(cleanId);
 
       if (!isMatch) return null;
 

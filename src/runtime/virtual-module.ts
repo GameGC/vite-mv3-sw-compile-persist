@@ -70,8 +70,9 @@ interface MV3RuntimeAPI {
   __mv3_setInterval(callback: () => void, intervalMs: number): string | number;
   __mv3_setTimeoutPromise(callback: () => void, delay: number): string | number;
   __mv3_setIntervalPromise(callback: () => void, intervalMs: number): string | number;
-  __mv3_clearTimeout(id: string | number | null | undefined): void;
-  __mv3_clearInterval(id: string | number | null | undefined): void;
+  __mv3_clearTimeout(id: any): void;
+  __mv3_clearInterval(id: any): void;
+  __mv3_clearAllAlarms(): Promise<boolean>;
   __mv3_reactive<T extends object>(target: T, varName: string): T;
   __mv3_getVar(name: string): any;
   __mv3_bindMethod(varName: string, methodName: string): (...args: any[]) => any;
@@ -476,7 +477,7 @@ function __mv3_setIntervalPromise(callback: () => void, intervalMs: number): str
   return id;
 }
 
-function __mv3_clearTimeout(id: string | number | null | undefined): void {
+function __mv3_clearTimeout(id: any): void {
   if (id == null) return;
   if (typeof id === 'string' && id.startsWith('__mv3_alarm_')) {
     __mv3_ext.alarms.clear(id);
@@ -485,7 +486,7 @@ function __mv3_clearTimeout(id: string | number | null | undefined): void {
 ${opts.keepaliveStrategy === 'offscreen' ? `    if (__mv3_alarm_callbacks.size === 0 && __mv3_native_timer_count === 0) {
       __mv3_closeOffscreenDocument();
     }` : ''}
-  } else if (typeof id === 'number') {
+  } else {
     __native_clearTimeout(id);
     __mv3_untrackPromiseTimer(id);
 ${opts.keepaliveStrategy === 'offscreen' ? `    __mv3_native_timer_count = Math.max(0, __mv3_native_timer_count - 1);
@@ -495,7 +496,7 @@ ${opts.keepaliveStrategy === 'offscreen' ? `    __mv3_native_timer_count = Math.
   }
 }
 
-function __mv3_clearInterval(id: string | number | null | undefined): void {
+function __mv3_clearInterval(id: any): void {
   if (id == null) return;
   if (typeof id === 'string' && id.startsWith('__mv3_alarm_')) {
     __mv3_ext.alarms.clear(id);
@@ -504,13 +505,28 @@ function __mv3_clearInterval(id: string | number | null | undefined): void {
 ${opts.keepaliveStrategy === 'offscreen' ? `    if (__mv3_alarm_callbacks.size === 0 && __mv3_native_timer_count === 0) {
       __mv3_closeOffscreenDocument();
     }` : ''}
-  } else if (typeof id === 'number') {
+  } else {
     __native_clearInterval(id);
     __mv3_untrackPromiseTimer(id);
 ${opts.keepaliveStrategy === 'offscreen' ? `    __mv3_native_timer_count = Math.max(0, __mv3_native_timer_count - 1);
     if (__mv3_alarm_callbacks.size === 0 && __mv3_native_timer_count === 0) {
       __mv3_closeOffscreenDocument();
     }` : ''}
+  }
+}
+
+async function __mv3_clearAllAlarms(): Promise<boolean> {
+  try {
+    const all = await __mv3_ext.alarms.getAll();
+    for (const alarm of all) {
+      if (!alarm.name.startsWith('__mv3_alarm_')) {
+        await __mv3_ext.alarms.clear(alarm.name);
+      }
+    }
+    return true;
+  } catch (err) {
+    console.error('[MV3] Failed in __mv3_clearAllAlarms:', err);
+    return false;
   }
 }
 
@@ -614,6 +630,7 @@ return {
   __mv3_setIntervalPromise,
   __mv3_clearTimeout,
   __mv3_clearInterval,
+  __mv3_clearAllAlarms,
   __mv3_reactive,
   __mv3_getVar,
   __mv3_bindMethod,

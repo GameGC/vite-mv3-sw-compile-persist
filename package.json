@@ -2,21 +2,34 @@
   "name": "vite-mv3-sw-compile-persist",
   "version": "0.1.2",
   "description": "Vite Chrome MV3 background service worker state (variables & timers) across restarts — automatically, persist state across SW restarts via chrome.storage.session and chrome.alarms",
-  "keywords":[
-    "vite", "vite-plugin", "rollup",
-    "chrome-extension", "browser-extension", "web-extension",
-    "mv3", "manifest-v3",
-    "service-worker", "service-worker-lifecycle", "background-script",
-    "persistent-state", "state-persistence", "persist",
-    "keep-alive", "chrome-alarms", "chrome-storage"
+  "keywords": [
+    "vite",
+    "vite-plugin",
+    "rollup",
+    "chrome-extension",
+    "browser-extension",
+    "web-extension",
+    "mv3",
+    "manifest-v3",
+    "service-worker",
+    "service-worker-lifecycle",
+    "background-script",
+    "persistent-state",
+    "state-persistence",
+    "persist",
+    "keep-alive",
+    "chrome-alarms",
+    "chrome-storage"
   ],
   "license": "Apache-2.0",
   "author": "GameGC",
-  "repository": { "type": "git", "url": "git+https://github.com/GameGC/vite-mv3-sw-compile-persist.git" },
-  "main": "./dist/index.cjs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GameGC/vite-mv3-sw-compile-persist.git"
+  },
+  "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
-
   "exports": {
     ".": {
       "import": {
@@ -30,12 +43,19 @@
     }
   },
   "homepage": "https://github.com/GameGC/vite-mv3-sw-compile-persist#readme",
-  "bugs": { "url": "https://github.com/GameGC/vite-mv3-sw-compile-persist/issues" },
-  "files": ["dist", "README.md", "LICENSE"],
+  "bugs": {
+    "url": "https://github.com/GameGC/vite-mv3-sw-compile-persist/issues"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "test": "node --import tsx tests/plugin.test.ts && node --import tsx tests/bracing.test.ts && node --import tsx tests/serialization.test.ts",
+    "test": "node --import tsx tests/plugin.test.ts && node --import tsx tests/bracing.test.ts && node --import tsx tests/serialization.test.ts && node --import tsx tests/job-scraper.test.ts && node --import tsx tests/simulator.test.ts && node --import tsx tests/api-flavors.test.ts && node --import tsx tests/state-strategies.test.ts && node --import tsx tests/timers-alarms.test.ts && node --import tsx tests/listeners-safety.test.ts && node --import tsx tests/control-flow.test.ts && node --import tsx tests/config-options.test.ts && node --import tsx tests/build-integration.test.ts && node --import tsx tests/e2e/runner.ts",
+    "test:e2e": "node --import tsx tests/e2e/runner.ts",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build"
   },
@@ -49,9 +69,13 @@
     "vite": ">=8.0.0"
   },
   "devDependencies": {
+    "@types/babel__traverse": "^7.28.0",
+    "@types/chrome": "^0.3.6",
+    "@types/webextension-polyfill": "^0.12.6",
     "tsup": "^8.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.5.0",
-    "vite": ">=8.0.0"
+    "vite": ">=8.0.0",
+    "webextension-polyfill": "^0.12.0"
   }
 }
