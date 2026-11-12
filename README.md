@@ -11,6 +11,8 @@
 [![Tests](https://img.shields.io/badge/tests-66%20passing-3fb950)](#-quality)
 
 </div>
+<small><sub>
+What is vite-mv3-sw-compile-persist? It’s a Vite plugin for Chrome Manifest V3 extensions. At build time it rewrites your background service worker so top-level let/var state is saved to chrome.storage.session and long setTimeout/setInterval calls are backed by chrome.alarms. You write ordinary code, and state and timers come back after Chrome terminates the idle worker. It adds no runtime dependency.</sub></small>
 
 ---
 
